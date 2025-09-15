@@ -95,7 +95,7 @@ pyinstaller app.spec
 - 初始版本发布
 - 基础文件夹扫描功能
 - Excel和JSON导出支持
-- 现代化UI界面
+
 
 ## 许可证
 
