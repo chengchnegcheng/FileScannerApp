@@ -91,7 +91,7 @@ pyinstaller app.spec
 
 ## 版本历史
 
-### v1.0.0
+### v3.0.0
 - 初始版本发布
 - 基础文件夹扫描功能
 - Excel和JSON导出支持
