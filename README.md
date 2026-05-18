@@ -1,107 +1,104 @@
-# 文件夹大小扫描器 (File Scanner)
+# 文件夹大小扫描器（File Scanner）
 
-一个基于PyQt5的文件夹大小扫描工具，可以快速扫描指定目录的文件大小，支持多种导出格式。
+一个基于 `PyQt5` 的 Windows 桌面工具，用于快速扫描目录下的一级文件夹，统计文件数量和占用空间，并支持导出与备份操作。
 
 ## 功能特性
 
-- 📁 文件夹大小扫描
-- 📊 实时进度显示
-- 💾 多种导出格式 (Excel, JSON)
-- 🎨 现代化UI界面
-- ⚡ 多线程扫描，不阻塞界面
-- 🔄 自动保存功能
-- 📈 详细统计信息
+- 扫描指定目录下的一级文件夹
+- 实时显示扫描、计算、备份状态
+- 支持导出选中结果到 Excel
+- 支持把选中的文件夹备份到目标目录
+- 提供最近目录、右键菜单、拖放目录等便捷操作
+- 自动保存最近一次扫描结果
+- 现代化桌面界面与统一图标风格
 
-## 界面预览
+## 运行环境
 
-![应用界面](Docs/ui.png)
+- Windows 10 / 11
+- Python 3.9+
 
-## 系统要求
+## 安装依赖
 
-- Windows 10/11
-- Python 3.7+ (如果从源码运行)
-
-## 安装使用
-
-### 方式1：直接运行可执行文件
-1. 下载最新版本的 `FileScanner.exe`
-2. 双击运行即可
-
-### 方式2：从源码运行
-1. 克隆仓库
-```bash
-git clone https://github.com/yourusername/FileScannerApp.git
-cd FileScannerApp
-```
-
-2. 安装依赖
 ```bash
 pip install -r requirements.txt
 ```
 
-3. 运行程序
+## 启动方式
+
 ```bash
 python app.py
 ```
 
 ## 使用说明
 
-1. 点击"选择文件夹"按钮选择要扫描的目录
-2. 点击"开始扫描"按钮开始扫描
-3. 扫描过程中可以随时点击"停止扫描"按钮停止
-4. 扫描完成后可以点击"导出"按钮导出结果
-5. 支持导出为Excel或JSON格式
+1. 点击 `选择目录` 选择要扫描的目录，或直接把目录拖到主界面
+2. 点击 `开始扫描` 加载一级文件夹列表
+3. 勾选需要处理的文件夹
+4. 点击 `计算大小` 获取文件夹大小和文件数
+5. 点击 `导出结果` 导出选中结果到 Excel
+6. 点击 `备份目录` 将选中的文件夹复制到目标目录
 
 ## 项目结构
 
-```
+```text
 FileScannerApp/
-├── app.py                 # 主程序入口
-├── models/                # 数据模型
-├── views/                 # 界面视图
-├── viewmodels/           # 视图模型
-├── services/             # 业务服务
-├── workers/              # 工作线程
-├── utils/                # 工具类
-├── resources/            # 资源文件
-│   ├── icons/           # 图标文件
-│   └── styles/          # 样式文件
-└── requirements.txt      # 依赖列表
+├── app.py
+├── models/
+├── services/
+├── utils/
+├── viewmodels/
+├── views/
+├── workers/
+├── resources/
+│   ├── icons/
+│   └── styles/
+├── Docs/
+└── requirements.txt
 ```
 
-## 技术栈
+## 主要依赖
 
-- **界面框架**: PyQt5
-- **数据处理**: pandas
-- **Excel支持**: openpyxl
-- **系统信息**: psutil
+- `PyQt5`：桌面界面
+- `pandas`：导出表格数据
+- `openpyxl`：写入 Excel
+- `psutil`：显示 CPU / 内存使用情况
 
-## 开发说明
+## 构建可执行文件
 
-### 构建可执行文件
 ```bash
 pyinstaller app.spec
 ```
 
-### 日志文件
-程序运行日志保存在 `logs/` 目录下
+## 日志与配置
 
-### 配置文件
-用户配置保存在 `config.json` 文件中
+- 日志目录：`logs/`
+- 自动保存目录：`auto_saves/`
+- 用户配置文件：`config.json`
 
-## 版本历史
+## 当前版本说明
 
-### v3.0.0
-- 初始版本发布
-- 基础文件夹扫描功能
-- Excel和JSON导出支持
+当前版本已包含以下改进：
+
+- 统一资源路径与日志初始化逻辑
+- 修复备份进度语义
+- 改进停止操作与按钮状态控制
+- 优化主界面、菜单、弹窗和图标风格
+
+## License
+
+MIT
 
 
-## 许可证
+## ?????
 
-MIT License
+```powershell
+# ???? EXE
+./scripts/build_release.ps1
 
+# ????? Inno Setup????????
+./scripts/build_release.ps1 -BuildInstaller
+```
 
-## 联系方式
-
-如有问题或建议，请通过GitHub Issues联系。
+- ????????`dist/FileScanner_Win11.exe`
+- ?????`installer/FileScanner_Win11.iss`
+- ???????`scripts/build_release.ps1`

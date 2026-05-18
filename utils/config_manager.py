@@ -3,11 +3,13 @@ import os
 import logging
 from typing import Any, Optional, List
 
+from utils.path_utils import get_app_data_dir
+
 class ConfigManager:
     """配置管理器"""
     
-    def __init__(self, config_file: str = "config.json"):
-        self.config_file = config_file
+    def __init__(self, config_file: str | None = None):
+        self.config_file = config_file or str(get_app_data_dir() / "config.json")
         self.logger = logging.getLogger(__name__)
         self._config = self._load_config()
         
@@ -25,6 +27,7 @@ class ConfigManager:
     def save_config(self):
         """保存配置"""
         try:
+            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
         except Exception as e:

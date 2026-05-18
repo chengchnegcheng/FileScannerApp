@@ -1,33 +1,33 @@
 import sys
 import os
 import logging
+from pathlib import Path
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 from views.main_window import MainWindow
 from utils.config_manager import ConfigManager
 from utils.logger import LogManager
-
-# 获取当前脚本的父目录的父目录 (即项目根目录)
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 将项目根目录添加到 Python 的 sys.path
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+from utils.path_utils import get_app_data_dir, get_resource_path, get_runtime_base_dir
 
 def setup_environment():
     """设置运行环境"""
     try:
+        runtime_base_dir = get_runtime_base_dir()
+        app_data_dir = get_app_data_dir()
+
         # 创建必要的目录
         required_dirs = [
-            'logs',
-            'resources',
-            'resources/icons',
-            'resources/styles',
-            'auto_saves'
+            app_data_dir,
+            app_data_dir / 'logs',
+            app_data_dir / 'auto_saves',
+            runtime_base_dir / 'resources',
+            runtime_base_dir / 'resources/icons',
+            runtime_base_dir / 'resources/styles',
         ]
         
         for directory in required_dirs:
-            if not os.path.exists(directory):
-                os.makedirs(directory)
+            Path(directory).mkdir(parents=True, exist_ok=True)
                 
         # 设置应用程序信息
         QApplication.setApplicationName("文件夹大小扫描器")
@@ -47,15 +47,9 @@ def check_resources():
     """检查必要的资源文件"""
     try:
         # 检查样式文件
-        style_file = "resources/styles/main.qss"
-        if not os.path.exists(style_file):
-            # 如果样式文件不存在，创建默认样式文件
-            from shutil import copyfile
-            default_style = "resources/styles.qss"
-            if os.path.exists(default_style):
-                copyfile(default_style, style_file)
-            else:
-                print(f"Warning: Default style file not found: {default_style}")
+        style_file = get_resource_path("resources/styles/main.qss")
+        if not style_file.exists():
+            print(f"Warning: Style file not found: {style_file}")
         
         # 检查图标文件
         required_icons = [
@@ -63,10 +57,10 @@ def check_resources():
             'export', 'backup'
         ]
         
-        icon_dir = "resources/icons"
+        icon_dir = get_resource_path("resources/icons")
         missing_icons = [
             icon for icon in required_icons 
-            if not os.path.exists(f"{icon_dir}/{icon}.png")
+            if not (icon_dir / f"{icon}.png").exists()
         ]
         
         if missing_icons:
@@ -86,6 +80,10 @@ def main():
         
         # 创建应用程序实例
         app = QApplication(sys.argv)
+
+        app_icon = get_resource_path("resources/icons/app.png")
+        if app_icon.exists():
+            app.setWindowIcon(QIcon(str(app_icon)))
         
         # 初始化配置管理器
         config = ConfigManager()

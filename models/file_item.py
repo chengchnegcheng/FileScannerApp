@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
-import os
+
+from utils.size_formatter import format_bytes
 
 @dataclass
 class FileItem:
@@ -8,6 +9,7 @@ class FileItem:
     name: str
     path: str
     is_directory: bool = True
+    created_at: Optional[str] = None
     size: Optional[int] = None
     file_count: Optional[int] = 0
     status: str = "未计算"
@@ -32,15 +34,8 @@ class FileItem:
 
     def format_size(self) -> str:
         """格式化大小显示"""
-        if self.size is None:
-            return "未计算"
-            
-        units = ['B', 'KB', 'MB', 'GB', 'TB']
-        size = float(self.size)
-        unit_index = 0
-        
-        while size >= 1024 and unit_index < len(units) - 1:
-            size /= 1024
-            unit_index += 1
-            
-        return f"{size:.2f} {units[unit_index]}" 
+        return format_bytes(self.size)
+
+    def format_created_at(self) -> str:
+        """格式化创建时间显示"""
+        return self.created_at or "未获取"

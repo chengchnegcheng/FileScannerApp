@@ -20,8 +20,8 @@ class BackupWorker(QThread):
     def run(self):
         """运行备份任务"""
         try:
-            def progress_callback(current_file, current, total, speed):
-                self.progress.emit(current_file, current, total, speed, 0)
+            def progress_callback(current_file, current, total, speed, total_bytes):
+                self.progress.emit(current_file, current, total, speed, total_bytes)
                 
             success = self.scanner.backup_directories(
                 self.src_paths,

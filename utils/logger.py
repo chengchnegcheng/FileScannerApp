@@ -3,11 +3,13 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 
+from utils.path_utils import get_app_data_dir
+
 class LogManager:
     """日志管理器"""
     
-    def __init__(self, log_dir: str = "logs"):
-        self.log_dir = log_dir
+    def __init__(self, log_dir: str | None = None):
+        self.log_dir = log_dir or str(get_app_data_dir() / "logs")
         self._setup_logging()
         
     def _setup_logging(self):
@@ -26,6 +28,9 @@ class LogManager:
             # 配置根日志记录器
             logger = logging.getLogger()
             logger.setLevel(logging.INFO)
+
+            if getattr(logger, '_file_scanner_logging_configured', False):
+                return
             
             # 创建文件处理器
             file_handler = RotatingFileHandler(
@@ -51,6 +56,7 @@ class LogManager:
             # 添加处理器
             logger.addHandler(file_handler)
             logger.addHandler(console_handler)
+            logger._file_scanner_logging_configured = True
             
         except Exception as e:
             print(f"Error setting up logging: {str(e)}")
