@@ -1,6 +1,6 @@
 #define MyAppName "FileScanner"
 #define MyAppVersion "1.0.0"
-#define MyAppPublisher "YourCompany"
+#define MyAppPublisher "FileScanner"
 #define MyAppExeName "FileScanner_Win11.exe"
 
 [Setup]

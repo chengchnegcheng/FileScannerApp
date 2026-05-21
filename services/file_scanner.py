@@ -6,6 +6,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Generator, Optional, Callable, List
 from models.file_item import FileItem
+from services.backup_support import (
+    BackupCancelled,
+    BackupRollbackSession,
+    BackupStats,
+    check_backup_disk_space,
+    estimate_backup_bytes_for_request,
+    format_disk_space_error,
+)
 from utils.config_manager import ConfigManager
 from utils.path_utils import normalize_directory_path
 
@@ -24,6 +32,8 @@ class FileScanner:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.stopped = False
+        self.last_backup_error: Optional[str] = None
+        self.last_backup_stats: Optional[BackupStats] = None
         self._dir_info_cache: dict[str, tuple[tuple[int, int], int, int]] = {}
 
     def clear_calculation_cache(self):
@@ -65,7 +75,7 @@ class FileScanner:
         return total_size, file_count
         
     def stop(self):
-        """停止扫描"""
+        """停止当前正在运行的扫描、计算或备份任务。"""
         self.stopped = True
 
     def validate_backup_request(self, src_paths: List[str], dest_path: str) -> str:
@@ -80,6 +90,17 @@ class FileScanner:
 
         if not dest_dir.exists() or not dest_dir.is_dir():
             raise ValueError("备份目标目录不存在")
+
+        seen_source_names: dict[str, str] = {}
+        for src_path in src_paths:
+            source_name = Path(os.path.abspath(src_path)).name
+            previous_path = seen_source_names.get(source_name)
+            if previous_path is not None:
+                raise ValueError(
+                    f"选中了多个同名文件夹“{source_name}”，将备份到同一目标位置并互相覆盖："
+                    f"{previous_path} 与 {src_path}"
+                )
+            seen_source_names[source_name] = src_path
 
         for src_path in src_paths:
             normalized_src = os.path.abspath(src_path)
@@ -96,10 +117,42 @@ class FileScanner:
                     raise
 
             target_dir = dest_dir / source_dir.name
-            if target_dir.exists():
-                raise ValueError(f"已存在同名备份目录：{target_dir}")
+            if target_dir.exists() and not target_dir.is_dir():
+                raise ValueError(f"备份目标位置已存在同名文件：{target_dir}")
 
         return normalized_dest
+
+    def validate_backup_disk_space(
+        self,
+        src_paths: List[str],
+        dest_path: str,
+        known_sizes: Optional[dict[str, int]] = None,
+        required_bytes: Optional[int] = None,
+    ) -> int:
+        normalized_dest = self.validate_backup_request(src_paths, dest_path)
+        if self.stopped:
+            raise BackupCancelled("Operation cancelled")
+
+        if required_bytes is None:
+            required_bytes = estimate_backup_bytes_for_request(
+                src_paths,
+                normalized_dest,
+                known_sizes,
+                should_stop=lambda: self.stopped,
+            )
+
+        if self.stopped:
+            raise BackupCancelled("Operation cancelled")
+
+        has_space, free_bytes, needed_bytes = check_backup_disk_space(
+            normalized_dest,
+            required_bytes,
+        )
+        if not has_space:
+            raise ValueError(
+                format_disk_space_error(required_bytes, free_bytes, needed_bytes)
+            )
+        return required_bytes
         
     def scan_directory(self, path: str) -> Generator[FileItem, None, None]:
         """扫描目录
@@ -171,98 +224,181 @@ class FileScanner:
         self,
         src_paths: List[str],
         dest_path: str,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        progress_state: Optional[dict[str, int]] = None,
+        known_sizes: Optional[dict[str, int]] = None,
+        required_bytes: Optional[int] = None,
     ) -> bool:
-        """备份目录
-        
-        Args:
-            src_paths: 源目录路径列表
-            dest_path: 目标目录路径
-            progress_callback: 进度回调函数
-            
-        Returns:
-            bool: 是否成功
-        """
+        """备份选中的目录到目标位置（合并并覆盖）。"""
+        started_at = time.perf_counter()
+        stats = BackupStats(dest_path=dest_path, src_paths=list(src_paths))
+        self.last_backup_stats = stats
+
         try:
-            self.stopped = False
-            path = normalize_directory_path(path)
+            if self.stopped:
+                return False
+
+            self.last_backup_error = None
+            dest_path = normalize_directory_path(dest_path)
             dest_path = self.validate_backup_request(src_paths, dest_path)
-            total_items = len(src_paths)
-            
-            for index, src_path in enumerate(src_paths, 1):
+            if required_bytes is None:
+                required_bytes = self.validate_backup_disk_space(
+                    src_paths,
+                    dest_path,
+                    known_sizes,
+                )
+            stats.dest_path = dest_path
+
+            progress_state = self._normalize_backup_progress_state(progress_state) if progress_callback else None
+            self._backup_stats = stats
+
+            for src_path in src_paths:
                 if self.stopped:
                     return False
-                    
+
+                rollback_session = BackupRollbackSession(dest_path)
+                self._backup_rollback_session = rollback_session
+
                 try:
-                    # 创建目标目录
                     name = os.path.basename(src_path)
                     target_path = os.path.join(dest_path, name)
-                    
-                    # 复制目录
+                    rollback_session.begin_source_target(target_path)
+
                     shutil.copytree(
                         src_path,
                         target_path,
+                        dirs_exist_ok=True,
                         symlinks=True,
                         ignore=None,
                         copy_function=lambda src, dst: self._copy_with_progress(
-                            src, dst, progress_callback, index, total_items
-                        ) if progress_callback else shutil.copy2(src, dst)
+                            src,
+                            dst,
+                            progress_callback,
+                            progress_state,
+                        ),
                     )
-                    
+                    rollback_session.cleanup()
+
                 except Exception as e:
+                    if not self.stopped:
+                        self.last_backup_error = str(e)
+                        stats.rolled_back = True
+                        stats.rollback_error = rollback_session.rollback()
+                    else:
+                        rollback_session.cleanup()
                     self.logger.error(f"Error backing up {src_path}: {str(e)}")
                     return False
-                    
+                finally:
+                    self._backup_rollback_session = None
+
             return not self.stopped
-            
+
         except Exception as e:
+            if not self.stopped:
+                self.last_backup_error = str(e)
             self.logger.error(f"Error backing up directories: {str(e)}")
             return False
-            
+        finally:
+            stats.duration_seconds = time.perf_counter() - started_at
+            self._backup_stats = None
+
+    def _build_backup_progress_state(self, src_paths: List[str]) -> dict[str, int]:
+        total_files = 0
+        total_bytes = 0
+
+        for src_path in src_paths:
+            for root, _, files in os.walk(src_path):
+                for file_name in files:
+                    file_path = os.path.join(root, file_name)
+                    total_files += 1
+                    total_bytes += os.path.getsize(file_path)
+
+        return {
+            "copied_files": 0,
+            "copied_bytes": 0,
+            "total_files": total_files,
+            "total_bytes": total_bytes,
+        }
+
+    def _normalize_backup_progress_state(self, progress_state: Optional[dict[str, int]]) -> dict[str, int]:
+        progress_state = progress_state or {}
+        return {
+            "copied_files": int(progress_state.get("copied_files", 0) or 0),
+            "copied_bytes": int(progress_state.get("copied_bytes", 0) or 0),
+            "total_files": int(progress_state.get("total_files", 0) or 0),
+            "total_bytes": int(progress_state.get("total_bytes", 0) or 0),
+        }
+
+    def _copy_with_backup_tracking(self, src: str, dst: str) -> None:
+        session = getattr(self, "_backup_rollback_session", None)
+        stats = getattr(self, "_backup_stats", None)
+        if session is not None:
+            session.before_copy(dst)
+        shutil.copy2(src, dst)
+        if session is not None and stats is not None:
+            session.after_copy(dst, os.path.getsize(dst), stats)
+
     def _copy_with_progress(
         self,
         src: str,
         dst: str,
         callback: Callable,
-        current: int,
-        total: int
+        progress_state: Optional[dict[str, int]],
     ) -> None:
-        """带进度的文件复制
-        
-        Args:
-            src: 源文件路径
-            dst: 目标文件路径
-            callback: 进度回调函数
-            current: 当前项目索引
-            total: 总项目数
-        """
+        """复制单个文件并上报备份进度。"""
         try:
-            # 获取文件大小
+            session = getattr(self, "_backup_rollback_session", None)
+            stats = getattr(self, "_backup_stats", None)
+            if session is not None:
+                session.before_copy(dst)
+
             file_size = os.path.getsize(src)
             start_time = time.time()
-            
-            # 复制文件并报告进度
+
             with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
                 copied = 0
                 while True:
                     if self.stopped:
                         raise Exception("Operation cancelled")
-                        
+
                     buf = fsrc.read(8192)
                     if not buf:
                         break
-                        
+
                     fdst.write(buf)
                     copied += len(buf)
-                    
-                    if callback:
+                    if progress_state is not None:
+                        progress_state["copied_bytes"] += len(buf)
+
+                    if callback and progress_state is not None:
                         elapsed = time.time() - start_time
                         bytes_per_second = copied / elapsed if elapsed > 0 else 0
-                        callback(src, current, total, bytes_per_second, file_size)
-                        
-            # 复制文件属性
+                        current_file_index = progress_state["copied_files"] + 1
+                        callback(
+                            src,
+                            current_file_index,
+                            progress_state["total_files"],
+                            bytes_per_second,
+                            progress_state["copied_bytes"],
+                            progress_state["total_bytes"],
+                        )
+
             shutil.copystat(src, dst)
-            
+            if progress_state is not None:
+                progress_state["copied_files"] += 1
+            if session is not None and stats is not None:
+                session.after_copy(dst, file_size, stats)
+
+            if callback and progress_state is not None and file_size == 0:
+                callback(
+                    src,
+                    progress_state["copied_files"],
+                    progress_state["total_files"],
+                    0.0,
+                    progress_state["copied_bytes"],
+                    progress_state["total_bytes"],
+                )
+
         except Exception as e:
             self.logger.error(f"Error copying {src} to {dst}: {str(e)}")
             raise 

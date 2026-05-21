@@ -89,16 +89,16 @@ pyinstaller app.spec
 MIT
 
 
-## ?????
+## 发布构建
 
 ```powershell
-# ???? EXE
+# 仅构建 EXE（会先运行测试）
 ./scripts/build_release.ps1
 
-# ????? Inno Setup????????
+# 构建 EXE 并尝试生成安装包（需安装 Inno Setup 的 iscc）
 ./scripts/build_release.ps1 -BuildInstaller
 ```
 
-- ????????`dist/FileScanner_Win11.exe`
-- ?????`installer/FileScanner_Win11.iss`
-- ???????`scripts/build_release.ps1`
+- 可执行文件输出：`dist/FileScanner_Win11.exe`
+- 安装脚本：`installer/FileScanner_Win11.iss`
+- 一键脚本：`scripts/build_release.ps1`

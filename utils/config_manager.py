@@ -4,6 +4,11 @@ import logging
 from typing import Any, Optional, List
 
 from utils.path_utils import get_app_data_dir
+from utils.backup_history import (
+    MAX_BACKUP_HISTORY,
+    BackupHistoryEntry,
+    parse_backup_history,
+)
 
 class ConfigManager:
     """配置管理器"""
@@ -61,4 +66,53 @@ class ConfigManager:
             self.save_config()
             
         except Exception as e:
-            self.logger.error(f"Error adding recent directory: {str(e)}") 
+            self.logger.error(f"Error adding recent directory: {str(e)}")
+
+    def get_backup_history(self) -> list[BackupHistoryEntry]:
+        return parse_backup_history(self.get_setting("backup_history", []))
+
+    def add_backup_history(self, entry: BackupHistoryEntry) -> None:
+        try:
+            history = [record.to_dict() for record in self.get_backup_history()]
+            history.insert(0, entry.to_dict())
+            self.set_setting("backup_history", history[:MAX_BACKUP_HISTORY])
+            self.add_recent_backup_destination(entry.dest_path)
+            self.save_config()
+        except Exception as e:
+            self.logger.error(f"Error adding backup history: {str(e)}")
+
+    def get_recent_backup_destinations(self) -> list[str]:
+        destinations = self.get_setting("recent_backup_destinations", [])
+        return [path for path in destinations if path]
+
+    def remove_backup_history_at(self, index: int) -> None:
+        try:
+            history = [record.to_dict() for record in self.get_backup_history()]
+            if 0 <= index < len(history):
+                history.pop(index)
+                self.set_setting("backup_history", history)
+                self.save_config()
+        except Exception as e:
+            self.logger.error(f"Error removing backup history: {str(e)}")
+
+    def clear_backup_history(self) -> None:
+        try:
+            self.set_setting("backup_history", [])
+            self.save_config()
+        except Exception as e:
+            self.logger.error(f"Error clearing backup history: {str(e)}")
+
+    def add_recent_backup_destination(self, path: str) -> None:
+        try:
+            if not path:
+                return
+
+            destinations = self.get_recent_backup_destinations()
+            if path in destinations:
+                destinations.remove(path)
+            destinations.insert(0, path)
+            self.set_setting("recent_backup_destinations", destinations[:10])
+            self.set_setting("last_backup_destination", path)
+            self.save_config()
+        except Exception as e:
+            self.logger.error(f"Error adding recent backup destination: {str(e)}")

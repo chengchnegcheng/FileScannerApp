@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PyQt5.QtGui import QColor, QFont, QIcon
@@ -14,6 +15,16 @@ class FileTableModel(QAbstractTableModel):
     
     # 列定义
     COLUMNS = ['选择', '名称', '创建时间', '大小', '文件数', '状态']
+    EXPORT_COLUMNS = [
+        '名称',
+        '路径',
+        '创建时间',
+        '创建时间原值',
+        '大小',
+        '大小(字节)',
+        '文件数',
+        '状态',
+    ]
     
     def __init__(self):
         super().__init__()
@@ -239,15 +250,21 @@ class FileTableModel(QAbstractTableModel):
 
         return None
 
-    def export_to_excel(self, filepath: str, items: List[FileItem] = None):
+    @staticmethod
+    def normalize_export_filepath(filepath: str) -> str:
+        if filepath and not os.path.splitext(filepath)[1]:
+            return f"{filepath}.xlsx"
+        return filepath
+
+    def export_to_excel(self, filepath: str, items: List[FileItem] = None) -> str:
         """导出到Excel"""
         try:
-            # 使用指定项目或所有项目
-            items = items or self._data
+            export_path = self.normalize_export_filepath(filepath)
+            items_to_export = self._data if items is None else items
             
             # 准备数据
             data = []
-            for item in items:
+            for item in items_to_export:
                 data.append({
                     '名称': item.name,
                     '路径': item.path,
@@ -256,12 +273,13 @@ class FileTableModel(QAbstractTableModel):
                     '大小': item.format_size(),
                     '大小(字节)': item.size,
                     '文件数': item.file_count or 0,
-                    '状态': item.status
+                    '状态': item.status,
                 })
             
             # 创建DataFrame并导出
-            df = pd.DataFrame(data)
-            df.to_excel(filepath, index=False, engine='openpyxl')
+            df = pd.DataFrame(data, columns=self.EXPORT_COLUMNS)
+            df.to_excel(export_path, index=False, engine='openpyxl')
+            return export_path
             
         except Exception as e:
             self.logger.error(f"Error exporting to Excel: {str(e)}")

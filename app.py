@@ -32,8 +32,8 @@ def setup_environment():
         # 设置应用程序信息
         QApplication.setApplicationName("文件夹大小扫描器")
         QApplication.setApplicationVersion("1.0.0")
-        QApplication.setOrganizationName("YourCompany")
-        QApplication.setOrganizationDomain("yourcompany.com")
+        QApplication.setOrganizationName("FileScanner")
+        QApplication.setOrganizationDomain("filescanner.local")
         
         # 设置高DPI支持
         QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)

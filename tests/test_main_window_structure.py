@@ -6,12 +6,13 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QAbstractItemView, QMessageBox
+from PyQt5.QtWidgets import QApplication, QAbstractItemView, QLabel, QMessageBox
 
 from models.file_item import FileItem
 from utils.config_manager import ConfigManager
 from utils.path_utils import normalize_directory_path
 from views.main_window import MainWindow, NoFocusItemDelegate
+from views.backup_dialog import BackupDialog
 
 
 class MainWindowStructureTests(unittest.TestCase):
@@ -30,7 +31,7 @@ class MainWindowStructureTests(unittest.TestCase):
 
     def test_toolbar_uses_compact_scan_actions(self):
         self.assertEqual(self.window.select_btn.text(), "\u9009\u62e9\u76ee\u5f55")
-        self.assertEqual(self.window.start_btn.text(), "\u626b\u63cf")
+        self.assertEqual(self.window.start_btn.text(), "\u5f00\u59cb\u626b\u63cf")
         self.assertEqual(self.window.stop_btn.text(), "\u505c\u6b62")
         self.assertEqual(self.window.calculate_btn.text(), "\u8ba1\u7b97")
 
@@ -61,6 +62,27 @@ class MainWindowStructureTests(unittest.TestCase):
         actions = self.window.menuBar().actions()
         self.assertEqual(len(actions), 4)
         self.assertEqual(self.window.menuBar().objectName(), "appMenuBar")
+
+    def test_about_dialog_omits_feature_and_support_copy(self):
+        captured_texts = []
+        original_label = QLabel
+
+        def spy_label(*args, **kwargs):
+            if args and isinstance(args[0], str):
+                captured_texts.append(args[0])
+            return original_label(*args, **kwargs)
+
+        with patch("views.main_window.QLabel", side_effect=spy_label), patch(
+            "views.main_window.QDialog.exec_",
+            return_value=0,
+        ):
+            self.window._show_about_dialog()
+
+        combined = "\n".join(captured_texts)
+        self.assertNotIn("?????????", combined)
+        self.assertNotIn("????", combined)
+        self.assertNotIn("YourCompany", combined)
+        self.assertNotIn("yourcompany.com", combined)
 
     def test_browse_directory_starts_scan_immediately(self):
         chosen = os.path.join(self.temp_dir.name, "chosen")
@@ -178,12 +200,97 @@ class MainWindowStructureTests(unittest.TestCase):
         self.assertEqual(self.window.table_model.headerData(0, Qt.Horizontal), "")
         self.assertEqual(self.window.select_all_checkbox.text(), "")
 
+    def test_select_all_checkbox_is_left_biased_but_vertically_centered(self):
+        self.window.show()
+        self.app.processEvents()
+
+        header = self.window.table_view.horizontalHeader()
+        checkbox = self.window.select_all_checkbox
+        centered_x = header.sectionViewportPosition(0) + max(0, (header.sectionSize(0) - checkbox.width()) // 2)
+        centered_y = max(0, (header.height() - checkbox.height()) // 2)
+
+        self.assertGreaterEqual(centered_x - checkbox.x(), 2)
+        self.assertLessEqual(centered_x - checkbox.x(), 6)
+        self.assertLessEqual(abs(checkbox.y() - centered_y), 1)
+
     def test_select_all_checkbox_tooltip_reflects_selected_count(self):
         self.window.table_model.add_item(FileItem(name="a", path="/tmp/a"))
         self.window.table_model.add_item(FileItem(name="b", path="/tmp/b"))
         self.window.table_model.setData(self.window.table_model.index(0, 0), Qt.Checked, Qt.CheckStateRole)
 
         self.assertIn("1/2", self.window.select_all_checkbox.toolTip())
+
+    def test_start_backup_switches_main_and_dialog_to_busy_indeterminate_state(self):
+        source = os.path.join(self.temp_dir.name, "source")
+        destination = os.path.join(self.temp_dir.name, "dest")
+        os.makedirs(source, exist_ok=True)
+        os.makedirs(destination, exist_ok=True)
+        with open(os.path.join(source, "demo.txt"), "w", encoding="utf-8") as handle:
+            handle.write("hello")
+
+        item = FileItem(name="source", path=source, size=5, file_count=1, checked=True)
+        self.window._backup_dialog = BackupDialog(self.window, self.window.config)
+
+        with patch.object(self.window, "_start_worker", return_value=True) as start_worker_mock:
+            self.window._start_backup([item], destination)
+
+        start_worker_mock.assert_called_once()
+        self.assertTrue(self.window.progress_bar.isHidden())
+        self.assertEqual(self.window._backup_dialog.progress_bar.minimum(), 0)
+        self.assertEqual(self.window._backup_dialog.progress_bar.maximum(), 0)
+        self.assertFalse(self.window._backup_dialog.start_btn.isEnabled())
+        self.assertEqual(self.window._backup_dialog.cancel_btn.text(), "停止备份")
+
+    def test_backup_dialog_stop_button_triggers_stop_scan(self):
+        self.window._is_busy = True
+        self.window._backup_dialog = BackupDialog(self.window, self.window.config)
+        self.window._backup_dialog.backup_stop_requested.connect(self.window.stop_scan)
+        self.window._backup_dialog.begin_backup()
+
+        with patch.object(self.window.scanner, "stop") as stop_mock:
+            self.window._backup_dialog.backup_stop_requested.emit()
+
+        stop_mock.assert_called_once()
+
+    def test_on_backup_error_with_dialog_does_not_show_global_error(self):
+        self.window._backup_dialog = BackupDialog(self.window, self.window.config)
+
+        with patch.object(self.window, "show_error") as show_error_mock:
+            self.window._on_backup_error("备份错误", "磁盘空间不足")
+
+        show_error_mock.assert_not_called()
+        self.assertTrue(self.window._backup_failed)
+
+    def test_on_backup_error_without_dialog_shows_global_error(self):
+        self.window._backup_dialog = None
+
+        with patch.object(self.window, "show_error") as show_error_mock:
+            self.window._on_backup_error("备份错误", "磁盘空间不足")
+
+        show_error_mock.assert_called_once_with("备份错误", "磁盘空间不足")
+
+    def test_copy_checked_paths_writes_to_clipboard(self):
+        self.window.table_model.add_item(FileItem(name="a", path="/tmp/a", checked=True))
+        self.window.table_model.add_item(FileItem(name="b", path="/tmp/b"))
+
+        self.window._copy_checked_paths()
+
+        self.assertEqual(QApplication.clipboard().text(), "/tmp/a")
+        self.assertIn("已复制 1 条路径", self.window._status_message)
+
+    def test_empty_state_label_shows_workflow_hint(self):
+        self.assertIn("选择目录", self.window.empty_state_label.text())
+        self.assertIn("计算", self.window.empty_state_label.text())
+
+    def test_on_backup_finished_success_uses_merge_overwrite_copy(self):
+        self.window._is_busy = True
+        self.window._backup_failed = False
+        self.window.scanner.stopped = False
+        self.window._cancel_requested = False
+
+        self.window._on_backup_finished(True)
+
+        self.assertIn("合并并覆盖", self.window._status_message)
 
     def test_select_all_checkbox_is_disabled_when_table_is_empty(self):
         self.window._update_select_all_state()

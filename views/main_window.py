@@ -38,12 +38,13 @@ from utils.ui_state import build_action_state
 from utils.ui_layout import get_minimal_workflow_layout
 from utils.fluent_theme import get_fluent_theme
 from utils.size_formatter import format_bytes
+from utils.backup_history import create_backup_history_entry
 
 # 应用程序常量
 APP_NAME = "文件夹大小扫描器"
 APP_VERSION = "1.0.0"
-APP_ORGANIZATION = "YourCompany"
-APP_DOMAIN = "yourcompany.com"
+APP_ORGANIZATION = "FileScanner"
+APP_DOMAIN = "filescanner.local"
 
 # UI常量
 UI_UPDATE_INTERVAL = 100  # ms
@@ -59,6 +60,7 @@ TABLE_MIN_READABLE_WIDTHS = {
     4: 96,
     5: 88,
 }
+SELECT_ALL_HEADER_LEFT_BIAS = 3
 
 def get_resource_path(relative_path):
     """获取资源文件的绝对路径"""
@@ -178,6 +180,9 @@ class MainWindow(QMainWindow):
             self._auto_save_max_files = 5
             self._is_busy = False
             self._cancel_requested = False
+            self._backup_failed = False
+            self._last_backup_dest_path = None
+            self._last_backup_source_names: List[str] = []
             self._current_operation = "idle"
             self._status_message = "就绪"
             self._layout_config = get_minimal_workflow_layout()
@@ -274,7 +279,9 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence("Esc"), self, self.stop_scan)
             
             # 功能快捷键
-            QShortcut(QKeySequence("Ctrl+C"), self, self.calculate_selected)
+            QShortcut(QKeySequence("F5"), self, self.calculate_selected)
+            QShortcut(QKeySequence("Ctrl+Shift+C"), self, self.calculate_selected)
+            QShortcut(QKeySequence("Ctrl+C"), self, self._copy_checked_paths)
             QShortcut(QKeySequence("Ctrl+E"), self, self.export_to_excel)
             QShortcut(QKeySequence("Ctrl+B"), self, self.backup_directory)
             
@@ -418,9 +425,24 @@ class MainWindow(QMainWindow):
             command_layout.setSpacing(8)
             command_layout.setContentsMargins(8, 8, 8, 8)
 
-            self.select_btn = self._create_button("\u9009\u62e9\u76ee\u5f55", "folder", self.select_directory, None)
-            self.start_btn = self._create_button("\u626b\u63cf", "play", self.start_scan, None)
-            self.stop_btn = self._create_button("\u505c\u6b62", "stop", self.stop_scan, None)
+            self.select_btn = self._create_button(
+                "\u9009\u62e9\u76ee\u5f55",
+                "folder",
+                self.select_directory,
+                "\u9009\u62e9\u8981\u626b\u63cf\u7684\u76ee\u5f55\uff08\u652f\u6301\u6700\u8fd1\u8bb0\u5f55\uff09 (Ctrl+O)",
+            )
+            self.start_btn = self._create_button(
+                "\u5f00\u59cb\u626b\u63cf",
+                "play",
+                self.start_scan,
+                "\u626b\u63cf\u5f53\u524d\u76ee\u5f55\u4e0b\u7684\u4e00\u7ea7\u5b50\u6587\u4ef6\u5939 (Ctrl+S)",
+            )
+            self.stop_btn = self._create_button(
+                "\u505c\u6b62",
+                "stop",
+                self.stop_scan,
+                "\u505c\u6b62\u6b63\u5728\u8fdb\u884c\u7684\u626b\u63cf\u3001\u8ba1\u7b97\u6216\u5907\u4efd (Esc)",
+            )
 
             self.select_btn.setProperty("buttonRole", "secondary")
             self.start_btn.setProperty("buttonRole", "primary")
@@ -454,9 +476,24 @@ class MainWindow(QMainWindow):
             action_layout.setSpacing(8)
             action_layout.setContentsMargins(8, 8, 8, 8)
 
-            self.calculate_btn = self._create_button("计算", "calculate", self.calculate_selected, None)
-            self.export_btn = self._create_button("导出", "export", self.export_to_excel, None)
-            self.backup_btn = self._create_button("备份", "backup", self.backup_directory, None)
+            self.calculate_btn = self._create_button(
+                "计算",
+                "calculate",
+                self.calculate_selected,
+                "\u8ba1\u7b97\u9009\u4e2d\u6587\u4ef6\u5939\u7684\u5927\u5c0f\u4e0e\u6587\u4ef6\u6570 (F5)",
+            )
+            self.export_btn = self._create_button(
+                "导出",
+                "export",
+                self.export_to_excel,
+                "\u5c06\u9009\u4e2d\u7ed3\u679c\u5bfc\u51fa\u4e3a Excel (Ctrl+E)",
+            )
+            self.backup_btn = self._create_button(
+                "备份",
+                "backup",
+                self.backup_directory,
+                "\u5c06\u9009\u4e2d\u6587\u4ef6\u5939\u5907\u4efd\u5230\u76ee\u6807\u4f4d\u7f6e (Ctrl+B)",
+            )
 
             secondary_action_buttons = {
                 "calculate": self.calculate_btn,
@@ -599,7 +636,10 @@ class MainWindow(QMainWindow):
             self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
             self.table_view.customContextMenuRequested.connect(self._show_context_menu)
 
-            self.empty_state_label = QLabel("\u8bf7\u9009\u62e9\u76ee\u5f55")
+            self.empty_state_label = QLabel(
+                "\u70b9\u51fb\u300c\u9009\u62e9\u76ee\u5f55\u300d\u6216\u5c06\u6587\u4ef6\u5939\u62d6\u653e\u5230\u6b64\u5904\n"
+                "\u9009\u62e9\u540e\u4f1a\u81ea\u52a8\u626b\u63cf\u4e00\u7ea7\u5b50\u6587\u4ef6\u5939\uff1b\u52fe\u9009\u540e\u53ef\u8ba1\u7b97\u3001\u5bfc\u51fa\u6216\u5907\u4efd"
+            )
             self.empty_state_label.setObjectName("emptyStateLabel")
             self.empty_state_label.setAlignment(Qt.AlignCenter)
 
@@ -625,13 +665,14 @@ class MainWindow(QMainWindow):
         self.table_view.horizontalScrollBar().valueChanged.connect(self._reposition_select_all_checkbox)
 
         self._reposition_select_all_checkbox()
+        QTimer.singleShot(0, self._reposition_select_all_checkbox)
 
     def _reposition_select_all_checkbox(self, *_args) -> None:
         if self.select_all_checkbox is None or self.table_view is None:
             return
 
         header = self.table_view.horizontalHeader()
-        if header is None or not header.isVisible() or header.count() == 0:
+        if header is None or header.count() == 0:
             return
 
         indicator_size = self.select_all_checkbox.sizeHint()
@@ -639,7 +680,7 @@ class MainWindow(QMainWindow):
         section_height = header.height()
         section_left = header.sectionViewportPosition(0)
 
-        x = section_left + max(0, (section_width - indicator_size.width()) // 2)
+        x = section_left + max(0, ((section_width - indicator_size.width()) // 2) - SELECT_ALL_HEADER_LEFT_BIAS)
         y = max(0, (section_height - indicator_size.height()) // 2)
 
         self.select_all_checkbox.setGeometry(x, y, indicator_size.width(), indicator_size.height())
@@ -758,6 +799,32 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error formatting bytes: {str(e)}")
             return "0 B"
+
+    def _build_known_backup_progress_state(self, items: List[FileItem]) -> dict[str, int] | None:
+        if not items or any(item.size is None for item in items):
+            return None
+
+        return {
+            "copied_files": 0,
+            "copied_bytes": 0,
+            "total_files": sum(max(item.file_count or 0, 0) for item in items),
+            "total_bytes": sum(max(item.size or 0, 0) for item in items),
+        }
+
+    def _build_known_backup_sizes(self, items: List[FileItem]) -> dict[str, int] | None:
+        if not items or any(item.size is None for item in items):
+            return None
+
+        known_sizes: dict[str, int] = {}
+        for item in items:
+            known_sizes[os.path.abspath(item.path)] = max(item.size or 0, 0)
+        return known_sizes
+
+    def _format_backup_result_summary(self) -> str:
+        stats = self.scanner.last_backup_stats
+        if stats is None:
+            return ""
+        return stats.format_summary()
 
     def _set_status_message(self, message: str) -> None:
         self._status_message = message
@@ -1050,6 +1117,10 @@ class MainWindow(QMainWindow):
     def stop_scan(self):
         """停止当前操作"""
         try:
+            if self._backup_dialog and self._backup_dialog._backup_in_progress:
+                self._request_stop_backup()
+                return
+
             if not self._is_busy:
                 self._set_status_message("当前没有正在运行的任务")
                 return
@@ -1058,9 +1129,28 @@ class MainWindow(QMainWindow):
             self.scanner.stop()
             self._set_status_message("正在停止当前任务...")
             self._update_button_states()
-            
+
         except Exception as e:
             self.logger.error(f"Error stopping operation: {str(e)}")
+
+    def _request_stop_backup(self):
+        """停止备份（对话框与主窗口停止按钮统一入口）。"""
+        try:
+            if self._backup_dialog:
+                self._backup_dialog.set_stopping_state()
+
+            self._cancel_requested = True
+            self.scanner.stop()
+
+            if self._is_busy:
+                self._set_status_message("正在停止备份...")
+                self._set_runtime_state("备份中", "正在取消")
+                self._update_button_states()
+            elif self._backup_dialog and self._backup_dialog._backup_in_progress:
+                self._set_status_message("正在停止备份...")
+
+        except Exception as e:
+            self.logger.error(f"Error stopping backup: {str(e)}")
 
     def calculate_selected(self):
         """计算选中项目的大小"""
@@ -1113,8 +1203,8 @@ class MainWindow(QMainWindow):
                 return
                 
             # 导出数据
-            self.table_model.export_to_excel(file_path, items)
-            self._set_status_message(f"已导出到: {file_path}")
+            export_path = self.table_model.export_to_excel(file_path, items)
+            self._set_status_message(f"已导出到: {export_path}")
             
         except Exception as e:
             self.logger.error(f"Error exporting to Excel: {str(e)}")
@@ -1129,8 +1219,10 @@ class MainWindow(QMainWindow):
                 return
                 
             # 创建备份对话框
-            self._backup_dialog = BackupDialog(self)
+            self._backup_dialog = BackupDialog(self, self.config)
+            self._backup_dialog.set_sources_need_calculate(self._has_uncalculated_checked_items())
             self._backup_dialog.backup_started.connect(lambda dest_path: self._start_backup(items, dest_path))
+            self._backup_dialog.backup_stop_requested.connect(self._request_stop_backup)
             self._backup_dialog.exec_()
             
         except Exception as e:
@@ -1141,39 +1233,77 @@ class MainWindow(QMainWindow):
         """开始备份操作"""
         try:
             if self._is_busy:
+                if self._backup_dialog:
+                    self._backup_dialog.abort_prepare()
                 self.show_error("操作进行中", "请等待当前任务完成后再开始新的备份")
                 return
 
+            src_paths = [item.path for item in items]
+            known_sizes = self._build_known_backup_sizes(items)
+
             normalized_dest_path = self.scanner.validate_backup_request(
-                [item.path for item in items],
+                src_paths,
                 dest_path,
             )
 
-            # 创建备份工作线程
+            if any(item.size is None for item in items):
+                proceed = QMessageBox.warning(
+                    self,
+                    "提示",
+                    "选中的文件夹尚未计算大小，备份进度可能无法显示百分比。\n\n是否继续备份？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if proceed != QMessageBox.Yes:
+                    if self._backup_dialog:
+                        self._backup_dialog.abort_prepare()
+                    return
+
+            self._backup_failed = False
+            self._last_backup_dest_path = normalized_dest_path
+            self._last_backup_source_names = [os.path.basename(path) for path in src_paths]
+            if self._backup_dialog:
+                self._backup_dialog.begin_backup()
+
+            # 创建备份工作线程（磁盘预检在后台线程执行）
             worker = BackupWorker(
                 self.scanner,
-                [item.path for item in items],
-                normalized_dest_path
+                src_paths,
+                normalized_dest_path,
+                self._build_known_backup_progress_state(items),
+                known_sizes,
             )
             worker.progress.connect(self._on_backup_progress)
             worker.finished.connect(self._on_backup_finished)
-            worker.error.connect(self.show_error)
+            worker.error.connect(self._on_backup_error)
 
             if self._backup_dialog:
                 worker.progress.connect(self._backup_dialog.update_progress)
-                worker.finished.connect(self._backup_dialog.backup_finished)
+                worker.finished.connect(
+                    lambda success: self._backup_dialog.backup_finished(
+                        success,
+                        self._format_backup_result_summary(),
+                    )
+                )
+                worker.error.connect(
+                    lambda title, message: self._backup_dialog.backup_failed(
+                        title,
+                        message,
+                        self._format_backup_result_summary(),
+                    )
+                )
             
-            # 开始备份
-            if not self._start_worker(worker, "backup", "正在备份文件夹..."):
+            if not self._start_worker(worker, "backup", "\u6b63\u5728\u5907\u4efd\u6587\u4ef6\u5939..."):
+                if self._backup_dialog:
+                    self._backup_dialog.abort_prepare()
                 return
-            
-            # 更新UI状态
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setFormat("正在备份: %p%")
-            
+
+            self.progress_bar.setVisible(False)
+
         except Exception as e:
             self.logger.error(f"Error starting backup: {str(e)}")
+            if self._backup_dialog:
+                self._backup_dialog.abort_prepare()
             self.show_error("备份错误", str(e))
 
     def _on_calculate_progress(self, item: FileItem, current: int, total: int, speed: float):
@@ -1208,45 +1338,118 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Error handling calculate finished: {str(e)}")
 
-    def _on_backup_progress(self, current_file: str, current: int, total: int, speed: float, total_bytes: int):
+    def _on_backup_progress(self, current_file: str, current: int, total: int, speed: float, processed_bytes: int, total_bytes: int):
         """处理备份进度"""
         try:
-            # 更新进度条
-            progress = int(current * 100 / total)
-            self.progress_bar.setValue(progress)
-            
-            # 更新状态栏
-            self._set_status_message(f"正在备份: {os.path.basename(current_file)} ({current}/{total})")
-            
-            # 更新速度标签
-            self._set_runtime_state("备份中", f"{self._format_speed(speed)} | {self._format_bytes(total_bytes)}")
-            
+            if self._backup_dialog and self._backup_dialog._backup_in_progress:
+                self.progress_bar.setVisible(False)
+                current_name = os.path.basename(current_file) if current_file else "准备中"
+                self._set_status_message(f"正在备份: {current_name}（详见备份窗口）")
+                self._set_runtime_state("备份中", "进度请查看备份对话框")
+                return
+
+            if total_bytes > 0:
+                progress = min(100, int(processed_bytes * 100 / total_bytes))
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(progress)
+                status_suffix = f"{current}/{total}, {progress}%" if total else f"{progress}%"
+                detail = f"{self._format_speed(speed)} | {self._format_bytes(processed_bytes)} / {self._format_bytes(total_bytes)}"
+            elif total > 0:
+                progress = min(100, int(current * 100 / total))
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(progress)
+                status_suffix = f"{current}/{total}, {progress}%"
+                detail = f"{self._format_speed(speed)} | 已处理 {self._format_bytes(processed_bytes)}"
+            else:
+                self.progress_bar.setRange(0, 0)
+                status_suffix = f"{current}/?" if current else "进行中"
+                detail = f"{self._format_speed(speed)} | 已处理 {self._format_bytes(processed_bytes)}"
+
+            self._set_status_message(f"正在备份: {os.path.basename(current_file)} ({status_suffix})")
+            self._set_runtime_state("备份中", detail)
+
         except Exception as e:
             self.logger.error(f"Error updating backup progress: {str(e)}")
+
+    def _on_backup_error(self, title: str, message: str):
+        self._backup_failed = True
+        self.error_handler.handle_error(title, Exception(message))
+        if not self._backup_dialog:
+            self.show_error(title, message)
 
     def _on_backup_finished(self, success: bool):
         """处理备份完成"""
         try:
-            # 更新UI状态
             self._current_worker = None
             self._is_busy = False
             was_cancelled = self.scanner.stopped or self._cancel_requested
             self._cancel_requested = False
+            failed = self._backup_failed or (not success and not was_cancelled and bool(self.scanner.last_backup_error))
             self.progress_bar.setVisible(False)
             self._update_button_states()
-            
-            if success and not was_cancelled:
-                self._set_status_message("备份完成")
-            else:
-                self._set_status_message("备份已取消")
 
-            self._set_runtime_state("备份完成" if success and not was_cancelled else "备份已取消", "等待下一步操作")
-            
+            summary = self._format_backup_result_summary()
+
+            if success and not was_cancelled:
+                detail = summary or "已合并已有目录，并覆盖同名文件"
+                self._set_status_message("备份已完成（合并并覆盖）")
+                self._set_runtime_state("备份完成", detail.split("\n")[0] if detail else "等待下一步操作")
+            elif failed:
+                stats = self.scanner.last_backup_stats
+                if stats and stats.rolled_back:
+                    self._set_status_message("备份失败，已自动回滚")
+                    detail = self.scanner.last_backup_error or summary or "请查看错误详情"
+                else:
+                    self._set_status_message("备份失败")
+                    detail = self.scanner.last_backup_error or "请查看错误详情"
+                self._set_runtime_state("备份失败", detail.split("\n")[0] if detail else "请查看错误详情")
+            else:
+                self._set_status_message("备份已取消，已保留已复制内容")
+                self._set_runtime_state("备份已取消", summary.split("\n")[0] if summary else "等待下一步操作")
+
+            self._record_backup_history(
+                success=success,
+                was_cancelled=was_cancelled,
+                failed=failed,
+                summary=summary,
+            )
+
         except Exception as e:
             self.logger.error(f"Error handling backup finished: {str(e)}")
 
+    def _record_backup_history(
+        self,
+        *,
+        success: bool,
+        was_cancelled: bool,
+        failed: bool,
+        summary: str,
+    ) -> None:
+        dest_path = getattr(self, "_last_backup_dest_path", None)
+        if not dest_path:
+            return
+
+        if success and not was_cancelled:
+            status = "success"
+        elif was_cancelled:
+            status = "cancelled"
+        else:
+            status = "failed"
+
+        stats = self.scanner.last_backup_stats
+        entry = create_backup_history_entry(
+            dest_path=dest_path,
+            source_names=getattr(self, "_last_backup_source_names", []),
+            status=status,
+            files_copied=stats.files_copied if stats else 0,
+            bytes_copied=stats.bytes_copied if stats else 0,
+            duration_seconds=stats.duration_seconds if stats else 0.0,
+            detail=summary or self.scanner.last_backup_error or "",
+        )
+        self.config.add_backup_history(entry)
+
     def _update_select_all_state(self) -> None:
-        """??????????"""
+        """根据表格勾选情况更新表头全选复选框状态。"""
         try:
             if self.select_all_checkbox is None:
                 return
@@ -1291,6 +1494,21 @@ class MainWindow(QMainWindow):
         if self.select_all_checkbox is not None and self.select_all_checkbox.isEnabled():
             self.select_all_checkbox.setCheckState(Qt.Unchecked)
 
+    def _copy_checked_paths(self) -> None:
+        try:
+            items = self.table_model.get_checked_items()
+            if not items:
+                self._set_status_message("请先勾选要复制路径的文件夹")
+                return
+
+            QApplication.clipboard().setText("\n".join(item.path for item in items))
+            self._set_status_message(f"已复制 {len(items)} 条路径到剪贴板")
+        except Exception as e:
+            self.logger.error(f"Error copying checked paths: {str(e)}")
+
+    def _has_uncalculated_checked_items(self) -> bool:
+        return any(item.size is None for item in self.table_model.get_checked_items())
+
     def _update_button_states(self, scanning: bool = False) -> None:
         """更新按钮状态"""
         try:
@@ -1311,6 +1529,12 @@ class MainWindow(QMainWindow):
             self.calculate_btn.setEnabled(action_state.calculate_enabled)
             self.export_btn.setEnabled(action_state.export_enabled)
             self.backup_btn.setEnabled(action_state.backup_enabled)
+            if action_state.backup_enabled and self._has_uncalculated_checked_items():
+                self.backup_btn.setToolTip(
+                    "将选中文件夹备份到目标位置 (Ctrl+B)\n建议先点击「计算」以显示准确进度"
+                )
+            elif action_state.backup_enabled:
+                self.backup_btn.setToolTip("将选中文件夹备份到目标位置 (Ctrl+B)")
 
             for action_name, enabled in (
                 ("_select_action", action_state.select_enabled),
@@ -1417,16 +1641,20 @@ class MainWindow(QMainWindow):
         self.current_path_label.setText(display_text)
         self.current_path_label.setToolTip(path)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        QTimer.singleShot(0, self._reposition_select_all_checkbox)
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._update_current_path_label(self.current_directory)
         self._reposition_select_all_checkbox()
 
     def _on_select_all_changed(self, state):
-        """????????????
+        """处理表头全选复选框状态变化。
 
         Args:
-            state: Qt.CheckState ???
+            state: Qt 复选框状态
         """
         try:
             if state == Qt.PartiallyChecked:
@@ -1472,10 +1700,10 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error handling table click: {str(e)}")
 
     def _on_item_double_clicked(self, index):
-        """????????
+        """处理表格项双击，在资源管理器中打开对应文件夹。
         
         Args:
-            index: ????
+            index: 被双击的模型索引
         """
         try:
             if not index.isValid():
@@ -1489,7 +1717,7 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error handling item double click: {str(e)}")
 
     def _open_item_in_file_explorer(self, item: Optional[FileItem]) -> bool:
-        """???????????"""
+        """在资源管理器中打开指定文件夹。"""
         if not item or not item.path:
             self.show_error("打开失败", "未找到可打开的文件夹路径")
             return False
@@ -1648,7 +1876,7 @@ class MainWindow(QMainWindow):
             operation_menu.setObjectName("appMenu")
 
             self._calc_action = operation_menu.addAction("\u8ba1\u7b97\u5927\u5c0f(&C)")
-            self._calc_action.setShortcut("Ctrl+C")
+            self._calc_action.setShortcut("F5")
             self._calc_action.triggered.connect(self.calculate_selected)
 
             self._export_action = operation_menu.addAction("\u5bfc\u51fa Excel(&E)")
@@ -1725,18 +1953,8 @@ class MainWindow(QMainWindow):
             summary_label.setObjectName("dialogStatusLabel")
             summary_label.setWordWrap(True)
 
-            features_label = QLabel("\u2022 \u4e00\u952e\u626b\u63cf\u4e00\u7ea7\u6587\u4ef6\u5939\\n\u2022 \u5feb\u901f\u8ba1\u7b97\u5927\u5c0f\u4e0e\u6587\u4ef6\u6570\u91cf\\n\u2022 \u5bfc\u51fa Excel \u7ed3\u679c\\n\u2022 \u5907\u4efd\u9009\u4e2d\u6587\u4ef6\u5939")
-            features_label.setObjectName("dialogLabel")
-            features_label.setWordWrap(True)
-
-            support_label = QLabel(f"\u6280\u672f\u652f\u6301\\n{APP_ORGANIZATION}\\n{APP_DOMAIN}")
-            support_label.setObjectName("dialogLabel")
-            support_label.setWordWrap(True)
-
             card_layout.addWidget(title_label)
             card_layout.addWidget(summary_label)
-            card_layout.addWidget(features_label)
-            card_layout.addWidget(support_label)
             layout.addWidget(card)
 
             button_layout = QHBoxLayout()
