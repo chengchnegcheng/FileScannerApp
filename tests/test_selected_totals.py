@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication, QLabel
+from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow
 
 from models.file_item import FileItem
 from utils.size_formatter import format_bytes
@@ -36,6 +36,7 @@ class SelectedTotalsTests(unittest.TestCase):
         model.add_item(FileItem(name="c", path="c", size=512, file_count=5, checked=True))
 
         window = MainWindow.__new__(MainWindow)
+        QMainWindow.__init__(window)
         window.table_model = model
         window.folder_count_label = QLabel()
         window.selection_label = QLabel()
@@ -47,8 +48,9 @@ class SelectedTotalsTests(unittest.TestCase):
         window._is_busy = False
         window._cancel_requested = False
         window.logger = type("L", (), {"error": lambda *args, **kwargs: None})()
-        window._set_status_message = lambda message: None
+        window._set_status_message = lambda message, timeout_ms=0: None
         window._update_current_path_label = lambda path: None
+        window._pinned_until = 0.0
 
         window._update_status_bar()
 

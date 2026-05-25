@@ -8,22 +8,18 @@ from PyQt5.QtGui import QIcon
 from views.main_window import MainWindow
 from utils.config_manager import ConfigManager
 from utils.logger import LogManager
-from utils.path_utils import get_app_data_dir, get_resource_path, get_runtime_base_dir
+from utils.path_utils import get_app_data_dir, get_resource_path
 
 def setup_environment():
     """设置运行环境"""
     try:
-        runtime_base_dir = get_runtime_base_dir()
         app_data_dir = get_app_data_dir()
 
         # 创建必要的目录
         required_dirs = [
             app_data_dir,
-            app_data_dir / 'logs',
-            app_data_dir / 'auto_saves',
-            runtime_base_dir / 'resources',
-            runtime_base_dir / 'resources/icons',
-            runtime_base_dir / 'resources/styles',
+            app_data_dir / "logs",
+            app_data_dir / "auto_saves",
         ]
         
         for directory in required_dirs:

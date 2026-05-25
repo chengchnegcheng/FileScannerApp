@@ -3,7 +3,7 @@ import os
 import logging
 from typing import Any, Optional, List
 
-from utils.path_utils import get_app_data_dir
+from utils.path_utils import get_app_data_dir, normalize_directory_path
 from utils.backup_history import (
     MAX_BACKUP_HISTORY,
     BackupHistoryEntry,
@@ -46,25 +46,47 @@ class ConfigManager:
         """设置配置项"""
         self._config[key] = value
         
+    def _dedupe_normalized_paths(self, paths: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+
+        for path in paths:
+            if not path:
+                continue
+
+            normalized = normalize_directory_path(path)
+            key = normalized.casefold() if os.name == "nt" else normalized
+            if key in seen:
+                continue
+
+            seen.add(key)
+            result.append(normalized)
+
+        return result
+
+    def get_recent_directories(self) -> list[str]:
+        return self._dedupe_normalized_paths(self.get_setting("recent_directories", []))
+
     def add_recent_directory(self, path: str):
         """添加最近使用的目录"""
         try:
-            recent_dirs = self.get_setting('recent_directories', [])
-            
-            # 移除已存在的路径
-            if path in recent_dirs:
-                recent_dirs.remove(path)
-                
-            # 添加到开头
-            recent_dirs.insert(0, path)
-            
-            # 限制数量
-            recent_dirs = recent_dirs[:10]
-            
-            self.set_setting('recent_directories', recent_dirs)
-            self.set_setting('last_directory', path)
+            if not path:
+                return
+
+            normalized = normalize_directory_path(path)
+            recent_dirs = self._dedupe_normalized_paths(self.get_setting("recent_directories", []))
+            key = normalized.casefold() if os.name == "nt" else normalized
+            recent_dirs = [
+                existing
+                for existing in recent_dirs
+                if (existing.casefold() if os.name == "nt" else existing) != key
+            ]
+            recent_dirs.insert(0, normalized)
+
+            self.set_setting("recent_directories", recent_dirs[:10])
+            self.set_setting("last_directory", normalized)
             self.save_config()
-            
+
         except Exception as e:
             self.logger.error(f"Error adding recent directory: {str(e)}")
 
@@ -82,8 +104,7 @@ class ConfigManager:
             self.logger.error(f"Error adding backup history: {str(e)}")
 
     def get_recent_backup_destinations(self) -> list[str]:
-        destinations = self.get_setting("recent_backup_destinations", [])
-        return [path for path in destinations if path]
+        return self._dedupe_normalized_paths(self.get_setting("recent_backup_destinations", []))
 
     def remove_backup_history_at(self, index: int) -> None:
         try:
@@ -107,12 +128,19 @@ class ConfigManager:
             if not path:
                 return
 
-            destinations = self.get_recent_backup_destinations()
-            if path in destinations:
-                destinations.remove(path)
-            destinations.insert(0, path)
+            normalized = normalize_directory_path(path)
+            destinations = self._dedupe_normalized_paths(
+                self.get_setting("recent_backup_destinations", [])
+            )
+            key = normalized.casefold() if os.name == "nt" else normalized
+            destinations = [
+                existing
+                for existing in destinations
+                if (existing.casefold() if os.name == "nt" else existing) != key
+            ]
+            destinations.insert(0, normalized)
             self.set_setting("recent_backup_destinations", destinations[:10])
-            self.set_setting("last_backup_destination", path)
+            self.set_setting("last_backup_destination", normalized)
             self.save_config()
         except Exception as e:
             self.logger.error(f"Error adding recent backup destination: {str(e)}")

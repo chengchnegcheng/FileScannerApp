@@ -126,7 +126,7 @@ class MainWindowStructureTests(unittest.TestCase):
 
         self.window._set_selected_directory(chosen, auto_scan=False)
 
-        self.assertEqual(self.window.config.get_setting("recent_directories"), [chosen])
+        self.assertEqual(self.window.config.get_recent_directories(), [chosen])
         self.assertEqual(self.window.config.get_setting("last_directory"), chosen)
 
     def test_selected_long_path_is_elided_with_full_tooltip(self):

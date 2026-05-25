@@ -1,39 +1,34 @@
 from __future__ import annotations
-import sys
 import os
-import json
 import logging
-import traceback
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple, Callable
-from pathlib import Path
+from typing import Optional, List, Callable
 import psutil
 
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QPushButton, QTableView, 
-    QFileDialog, QProgressBar, QStatusBar, QHBoxLayout, QMessageBox, 
-    QLabel, QMenu, QLineEdit, QListWidget, QDialog, QShortcut, 
+    QMainWindow, QWidget, QVBoxLayout, QPushButton, QTableView,
+    QFileDialog, QProgressBar, QStatusBar, QHBoxLayout, QMessageBox,
+    QLabel, QMenu, QDialog, QShortcut,
     QCheckBox, QApplication, QFrame, QStyle, QSizePolicy, QHeaderView,
-    QStyledItemDelegate, QStyleOptionViewItem
+    QStyledItemDelegate, QStyleOptionViewItem,
 )
 from PyQt5.QtCore import (
-    QThread, pyqtSignal, Qt, QDir, QTimer, QUrl, QItemSelectionModel, 
-    QSize, QPoint, QSignalBlocker
+    QThread, Qt, QTimer, QItemSelectionModel,
+    QSize, QSignalBlocker,
 )
-from PyQt5.QtGui import QIcon, QKeySequence, QColor, QCursor
+from PyQt5.QtGui import QIcon, QKeySequence, QCursor
 
 from services.file_scanner import FileScanner
 from utils.config_manager import ConfigManager
 from utils.logger import LogManager
-from utils.path_utils import get_app_data_dir, normalize_directory_path
+from utils.path_utils import get_app_data_dir, get_resource_path, normalize_directory_path
 from models.file_item import FileItem
 from viewmodels.main_viewmodel import FileTableModel
 from workers.backup_worker import BackupWorker
 from workers.calculate_worker import CalculateWorker
 from workers.scan_worker import ScanWorker
 from views.backup_dialog import BackupDialog
-from utils.path_utils import get_resource_path as resolve_resource_path
 from utils.ui_state import build_action_state
 from utils.ui_layout import get_minimal_workflow_layout
 from utils.fluent_theme import get_fluent_theme
@@ -47,7 +42,10 @@ APP_ORGANIZATION = "FileScanner"
 APP_DOMAIN = "filescanner.local"
 
 # UI常量
-UI_UPDATE_INTERVAL = 100  # ms
+UI_UPDATE_INTERVAL = 250  # ms
+RESOURCE_UPDATE_INTERVAL = 2000  # ms
+STATUS_MESSAGE_TIMEOUT_MS = 4000
+WORKER_SHUTDOWN_TIMEOUT_MS = 5000
 AUTOSAVE_INTERVAL = 300000  # 5分钟
 MIN_WINDOW_SIZE = QSize(1120, 760)
 DEFAULT_BUTTON_SIZE = QSize(112, 36)
@@ -61,10 +59,6 @@ TABLE_MIN_READABLE_WIDTHS = {
     5: 88,
 }
 SELECT_ALL_HEADER_LEFT_BIAS = 3
-
-def get_resource_path(relative_path):
-    """获取资源文件的绝对路径"""
-    return str(resolve_resource_path(relative_path))
 
 
 class SelectAllCheckBox(QCheckBox):
@@ -164,12 +158,7 @@ class MainWindow(QMainWindow):
             self.memory_label = None
             self.cpu_label = None
             self.current_path_label = None
-            self.page_title_label = None
-            self.page_subtitle_label = None
-            self.table_title_label = None
-            self.table_hint_label = None
-            self.scan_card_title_label = None
-            
+
             # 其他控件
             self.select_all_checkbox = None
             self.empty_state_label = None
@@ -185,6 +174,8 @@ class MainWindow(QMainWindow):
             self._last_backup_source_names: List[str] = []
             self._current_operation = "idle"
             self._status_message = "就绪"
+            self._pinned_until = 0.0
+            self._last_status_bar_counts: tuple[int, int, bool] | None = None
             self._layout_config = get_minimal_workflow_layout()
             self._theme = get_fluent_theme()
             
@@ -199,7 +190,12 @@ class MainWindow(QMainWindow):
             self._update_timer = QTimer(self)
             self._update_timer.setInterval(UI_UPDATE_INTERVAL)
             self._update_timer.timeout.connect(self._update_ui)
-            
+
+            self._resource_timer = QTimer(self)
+            self._resource_timer.setInterval(RESOURCE_UPDATE_INTERVAL)
+            self._resource_timer.timeout.connect(self._monitor_system_resources)
+            psutil.cpu_percent(interval=None)
+
             # 自动保存定时器
             self._autosave_timer = QTimer(self)
             self._autosave_timer.setInterval(AUTOSAVE_INTERVAL)
@@ -217,7 +213,7 @@ class MainWindow(QMainWindow):
             self.setMinimumSize(MIN_WINDOW_SIZE)
             
             # 设置窗口图标
-            icon_path = get_resource_path("resources/icons/app.png")
+            icon_path = str(get_resource_path("resources/icons/app.png"))
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
             
@@ -250,17 +246,11 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error setting up UI: {str(e)}")
             raise
 
-    def _create_page_header(self) -> QWidget:
-        """创建页面头部。"""
-        container = QWidget()
-        container.setVisible(False)
-        return container
-
     def _setup_styles(self):
         """设置样式"""
         try:
             # 加载QSS样式文件
-            style_file = get_resource_path("resources/styles/main.qss")
+            style_file = str(get_resource_path("resources/styles/main.qss"))
             if os.path.exists(style_file):
                 with open(style_file, 'r', encoding='utf-8') as f:
                     self.setStyleSheet(f.read())
@@ -297,6 +287,7 @@ class MainWindow(QMainWindow):
         try:
             # 启动定时器
             self._update_timer.start()
+            self._resource_timer.start()
             self._autosave_timer.start()
             
             # 设置状态栏初始消息
@@ -307,48 +298,28 @@ class MainWindow(QMainWindow):
             raise
 
     def _update_ui(self) -> None:
-        """更新UI状态"""
+        """周期性刷新按钮与统计区（不采样 CPU）。"""
         try:
-            # 限制更新频率
-            current_time = time.time()
-            if not hasattr(self, '_last_ui_update'):
-                self._last_ui_update = 0
-            if current_time - self._last_ui_update < 0.1:
-                return
-                
-            # 更新性能统计
-            self._monitor_system_resources()
-            
-            # 更新按钮状态
             self._update_button_states()
-            
-            # 更新状态栏
             self._update_status_bar()
-            
-            self._last_ui_update = current_time
-            
         except Exception as e:
             self.logger.error(f"Error updating UI: {str(e)}")
 
     def _monitor_system_resources(self) -> None:
-        """监控系统资源使用情况"""
+        """非阻塞采样 CPU/内存并更新底部标签。"""
         try:
-            # 获取内存使用情况
             memory = psutil.virtual_memory()
+            cpu_percent = psutil.cpu_percent(interval=None)
+
             if memory.percent > 90:
                 self.logger.warning(f"High memory usage: {memory.percent}%")
-                
-            # 获取CPU使用情况
-            cpu_percent = psutil.cpu_percent(interval=0.1)
             if cpu_percent > 90:
                 self.logger.warning(f"High CPU usage: {cpu_percent}%")
-                
-            # 更新标签
+
             if self.memory_label is not None:
-                self.memory_label.setText(f"内存: {memory.percent}%")
+                self.memory_label.setText(f"内存: {memory.percent:.0f}%")
             if self.cpu_label is not None:
-                self.cpu_label.setText(f"CPU: {cpu_percent}%")
-            
+                self.cpu_label.setText(f"CPU: {cpu_percent:.0f}%")
         except Exception as e:
             self.logger.error(f"Error monitoring system resources: {str(e)}")
 
@@ -411,9 +382,9 @@ class MainWindow(QMainWindow):
             path_layout.setSpacing(2)
             path_layout.setContentsMargins(10, 6, 10, 6)
 
-            path_title = QLabel("\u8def\u5f84")
+            path_title = QLabel('路径')
             path_title.setObjectName("groupCaptionLabel")
-            self.current_path_label = QLabel("\u672a\u9009\u62e9\u76ee\u5f55")
+            self.current_path_label = QLabel('未选择目录')
             self.current_path_label.setObjectName("currentPathLabel")
             self.current_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
             path_layout.addWidget(path_title)
@@ -426,22 +397,22 @@ class MainWindow(QMainWindow):
             command_layout.setContentsMargins(8, 8, 8, 8)
 
             self.select_btn = self._create_button(
-                "\u9009\u62e9\u76ee\u5f55",
+                '选择目录',
                 "folder",
                 self.select_directory,
-                "\u9009\u62e9\u8981\u626b\u63cf\u7684\u76ee\u5f55\uff08\u652f\u6301\u6700\u8fd1\u8bb0\u5f55\uff09 (Ctrl+O)",
+                '选择要扫描的目录（支持最近记录） (Ctrl+O)',
             )
             self.start_btn = self._create_button(
-                "\u5f00\u59cb\u626b\u63cf",
+                '开始扫描',
                 "play",
                 self.start_scan,
-                "\u626b\u63cf\u5f53\u524d\u76ee\u5f55\u4e0b\u7684\u4e00\u7ea7\u5b50\u6587\u4ef6\u5939 (Ctrl+S)",
+                '扫描当前目录下的一级子文件夹 (Ctrl+S)',
             )
             self.stop_btn = self._create_button(
-                "\u505c\u6b62",
+                '停止',
                 "stop",
                 self.stop_scan,
-                "\u505c\u6b62\u6b63\u5728\u8fdb\u884c\u7684\u626b\u63cf\u3001\u8ba1\u7b97\u6216\u5907\u4efd (Esc)",
+                '停止正在进行的扫描、计算或备份 (Esc)',
             )
 
             self.select_btn.setProperty("buttonRole", "secondary")
@@ -480,19 +451,19 @@ class MainWindow(QMainWindow):
                 "计算",
                 "calculate",
                 self.calculate_selected,
-                "\u8ba1\u7b97\u9009\u4e2d\u6587\u4ef6\u5939\u7684\u5927\u5c0f\u4e0e\u6587\u4ef6\u6570 (F5)",
+                '计算选中文件夹的大小与文件数 (F5)',
             )
             self.export_btn = self._create_button(
                 "导出",
                 "export",
                 self.export_to_excel,
-                "\u5c06\u9009\u4e2d\u7ed3\u679c\u5bfc\u51fa\u4e3a Excel (Ctrl+E)",
+                '将选中结果导出为 Excel (Ctrl+E)',
             )
             self.backup_btn = self._create_button(
                 "备份",
                 "backup",
                 self.backup_directory,
-                "\u5c06\u9009\u4e2d\u6587\u4ef6\u5939\u5907\u4efd\u5230\u76ee\u6807\u4f4d\u7f6e (Ctrl+B)",
+                '将选中文件夹备份到目标位置 (Ctrl+B)',
             )
 
             secondary_action_buttons = {
@@ -514,7 +485,7 @@ class MainWindow(QMainWindow):
             self.select_all_checkbox = SelectAllCheckBox("")
             self.select_all_checkbox.stateChanged.connect(self._on_select_all_changed)
             self.select_all_checkbox.setEnabled(False)
-            self.select_all_checkbox.setToolTip("\u5f53\u524d\u6ca1\u6709\u53ef\u9009\u62e9\u7684\u9879\u76ee")
+            self.select_all_checkbox.setToolTip('当前没有可选择的项目')
 
             layout.addWidget(action_group, 1)
             return container
@@ -523,7 +494,7 @@ class MainWindow(QMainWindow):
             raise
 
     def _create_stats_panel(self) -> QWidget:
-        """创建结果表格视图。"""
+        """创建底部统计与运行时进度区域。"""
         try:
             container = QFrame()
             container.setObjectName("statsPanel")
@@ -538,12 +509,12 @@ class MainWindow(QMainWindow):
             stats_layout.setSpacing(8)
             stats_layout.setContentsMargins(8, 8, 8, 8)
 
-            self.folder_count_label = QLabel("\u6587\u4ef6\u5939: 0")
-            self.selection_label = QLabel("\u5df2\u9009: 0")
-            self.file_count_label = QLabel("\u6587\u4ef6\u6570: \u672a\u8ba1\u7b97")
-            self.size_label = QLabel("\u603b\u5927\u5c0f: \u672a\u8ba1\u7b97")
-            self.selected_file_count_label = QLabel("\u5df2\u9009\u6587\u4ef6\u6570: \u672a\u8ba1\u7b97")
-            self.selected_size_label = QLabel("\u5df2\u9009\u603b\u5927\u5c0f: \u672a\u8ba1\u7b97")
+            self.folder_count_label = QLabel('文件夹: 0')
+            self.selection_label = QLabel('已选: 0')
+            self.file_count_label = QLabel('文件数: 未计算')
+            self.size_label = QLabel('总大小: 未计算')
+            self.selected_file_count_label = QLabel('已选文件数: 未计算')
+            self.selected_size_label = QLabel('已选总大小: 未计算')
 
             for label in [
                 self.folder_count_label,
@@ -562,9 +533,9 @@ class MainWindow(QMainWindow):
             runtime_layout.setSpacing(6)
             runtime_layout.setContentsMargins(10, 8, 10, 8)
 
-            self.runtime_state_label = QLabel("\u672a\u5f00\u59cb")
+            self.runtime_state_label = QLabel('未开始')
             self.runtime_state_label.setObjectName("runtimeStateLabel")
-            self.speed_label = QLabel("\u7b49\u5f85\u64cd\u4f5c")
+            self.speed_label = QLabel('等待操作')
             self.speed_label.setObjectName("runtimeMetaLabel")
 
             self.progress_bar = QProgressBar()
@@ -585,7 +556,7 @@ class MainWindow(QMainWindow):
             raise
 
     def _create_table_view(self) -> QWidget:
-        """创建底部状态区域。"""
+        """创建结果表格与空状态提示区域。"""
         try:
             self._table_container = container = QFrame()
             container.setObjectName("tableContainer")
@@ -628,7 +599,6 @@ class MainWindow(QMainWindow):
             self._enforce_table_column_widths()
 
             self.table_model.dataChanged.connect(self._on_data_changed)
-            self.table_view.setSortingEnabled(True)
             self.table_model.rowsInserted.connect(lambda *_: self._on_model_rows_changed())
             self.table_model.modelReset.connect(lambda: self._on_model_rows_changed())
             self.table_view.clicked.connect(self._on_table_clicked)
@@ -637,8 +607,8 @@ class MainWindow(QMainWindow):
             self.table_view.customContextMenuRequested.connect(self._show_context_menu)
 
             self.empty_state_label = QLabel(
-                "\u70b9\u51fb\u300c\u9009\u62e9\u76ee\u5f55\u300d\u6216\u5c06\u6587\u4ef6\u5939\u62d6\u653e\u5230\u6b64\u5904\n"
-                "\u9009\u62e9\u540e\u4f1a\u81ea\u52a8\u626b\u63cf\u4e00\u7ea7\u5b50\u6587\u4ef6\u5939\uff1b\u52fe\u9009\u540e\u53ef\u8ba1\u7b97\u3001\u5bfc\u51fa\u6216\u5907\u4efd"
+                '点击「选择目录」或将文件夹拖放到此处\n'
+                '选择后会自动扫描一级子文件夹；勾选后可计算、导出或备份'
             )
             self.empty_state_label.setObjectName("emptyStateLabel")
             self.empty_state_label.setAlignment(Qt.AlignCenter)
@@ -688,12 +658,12 @@ class MainWindow(QMainWindow):
 
     def _build_select_all_tooltip(self, checked_count: int, total_count: int) -> str:
         if total_count == 0:
-            return "\u5f53\u524d\u6ca1\u6709\u53ef\u9009\u62e9\u7684\u9879\u76ee"
+            return '当前没有可选择的项目'
 
         if checked_count == total_count:
-            return f"\u53d6\u6d88\u5168\u9009\uff08{checked_count}/{total_count}\uff09"
+            return f'取消全选（{checked_count}/{total_count}）'
 
-        return f"\u5168\u9009\uff08{checked_count}/{total_count}\uff09"
+        return f'全选（{checked_count}/{total_count}）'
 
     def _enforce_table_column_widths(self) -> None:
         """保持关键列的最小可读宽度。"""
@@ -739,8 +709,7 @@ class MainWindow(QMainWindow):
             button = QPushButton(text)
             button.setObjectName("toolbarButton")
             
-            # 设置图标
-            button.setIcon(QIcon())
+            button.setIcon(self._get_button_icon(icon_name))
             
             # 设置大小和样式
             button.setMinimumSize(DEFAULT_BUTTON_SIZE)
@@ -771,8 +740,8 @@ class MainWindow(QMainWindow):
             return self.style().standardIcon(standard_icons[icon_name])
 
         icon_path = get_resource_path(f"resources/icons/{icon_name}.png")
-        if os.path.exists(icon_path):
-            return QIcon(icon_path)
+        if icon_path.exists():
+            return QIcon(str(icon_path))
 
         return QIcon()
 
@@ -826,9 +795,15 @@ class MainWindow(QMainWindow):
             return ""
         return stats.format_summary()
 
-    def _set_status_message(self, message: str) -> None:
+    def _set_status_message(self, message: str, *, timeout_ms: int = 0) -> None:
         self._status_message = message
-        if self.status_bar:
+        if not self.status_bar:
+            return
+        if timeout_ms > 0:
+            self._pinned_until = time.time() + (timeout_ms / 1000.0)
+            self.status_bar.showMessage(message, timeout_ms)
+        else:
+            self._pinned_until = 0.0
             self.status_bar.showMessage(message)
 
     def _set_runtime_state(self, state: str, detail: str | None = None) -> None:
@@ -918,7 +893,7 @@ class MainWindow(QMainWindow):
     def select_directory(self):
         """选择目录"""
         try:
-            recent_dirs = [path for path in self.config.get_setting('recent_directories', []) if path]
+            recent_dirs = self.config.get_recent_directories()
             if recent_dirs:
                 self._show_directory_menu()
             else:
@@ -930,8 +905,8 @@ class MainWindow(QMainWindow):
         """显示最近目录菜单"""
         try:
             menu = QMenu(self)
-            recent_dirs = [path for path in self.config.get_setting('recent_directories', []) if path]
-            
+            recent_dirs = self.config.get_recent_directories()
+
             for path in recent_dirs:
                 action = menu.addAction(path)
                 action.triggered.connect(lambda checked, p=path: self._set_selected_directory(p))
@@ -951,7 +926,9 @@ class MainWindow(QMainWindow):
         """浏览并选择目录"""
         try:
             # 获取上次的目录
-            last_dir = self.config.get_setting('last_directory', os.path.expanduser('~'))
+            last_dir = normalize_directory_path(
+                self.config.get_setting("last_directory", os.path.expanduser("~"))
+            )
             
             # 打开目录选择对话框
             path = QFileDialog.getExistingDirectory(
@@ -972,7 +949,6 @@ class MainWindow(QMainWindow):
         """设置当前目录，并按需立即开始扫描。"""
         path = normalize_directory_path(path)
         self.current_directory = path
-        self.scanner.clear_calculation_cache()
         self._update_current_path_label(path)
 
         self.table_model.clear()
@@ -998,7 +974,6 @@ class MainWindow(QMainWindow):
             
             # 更新当前目录
             self.current_directory = path
-            self.scanner.clear_calculation_cache()
             self._update_current_path_label(path)
             
             # 清空现有数据
@@ -1204,7 +1179,10 @@ class MainWindow(QMainWindow):
                 
             # 导出数据
             export_path = self.table_model.export_to_excel(file_path, items)
-            self._set_status_message(f"已导出到: {export_path}")
+            self._set_status_message(
+                f"已导出到: {export_path}",
+                timeout_ms=STATUS_MESSAGE_TIMEOUT_MS,
+            )
             
         except Exception as e:
             self.logger.error(f"Error exporting to Excel: {str(e)}")
@@ -1293,7 +1271,7 @@ class MainWindow(QMainWindow):
                     )
                 )
             
-            if not self._start_worker(worker, "backup", "\u6b63\u5728\u5907\u4efd\u6587\u4ef6\u5939..."):
+            if not self._start_worker(worker, "backup", '正在备份文件夹...'):
                 if self._backup_dialog:
                     self._backup_dialog.abort_prepare()
                 return
@@ -1502,7 +1480,10 @@ class MainWindow(QMainWindow):
                 return
 
             QApplication.clipboard().setText("\n".join(item.path for item in items))
-            self._set_status_message(f"已复制 {len(items)} 条路径到剪贴板")
+            self._set_status_message(
+                f"已复制 {len(items)} 条路径到剪贴板",
+                timeout_ms=STATUS_MESSAGE_TIMEOUT_MS,
+            )
         except Exception as e:
             self.logger.error(f"Error copying checked paths: {str(e)}")
 
@@ -1558,7 +1539,7 @@ class MainWindow(QMainWindow):
         self._update_status_bar()
 
     def _update_status_bar(self) -> None:
-        """更新状态栏"""
+        """更新统计标签；空闲且未固定提示时才刷新默认状态消息。"""
         try:
             total_items = self.table_model.rowCount()
             checked_items = len(self.table_model.get_checked_items())
@@ -1566,9 +1547,18 @@ class MainWindow(QMainWindow):
                 self.table_model.get_item(i).size is not None
                 for i in range(total_items)
             )
+            counts_key = (total_items, checked_items, has_computed)
+            counts_changed = counts_key != getattr(self, "_last_status_bar_counts", None)
+            self._last_status_bar_counts = counts_key
 
-            self.folder_count_label.setText(f"\u6587\u4ef6\u5939: {total_items:,}")
-            self.selection_label.setText(f"\u5df2\u9009: {checked_items:,}")
+            self._set_label_text_if_changed(
+                self.folder_count_label,
+                f'文件夹: {total_items:,}',
+            )
+            self._set_label_text_if_changed(
+                self.selection_label,
+                f'已选: {checked_items:,}',
+            )
 
             checked_has_computed = any(
                 self.table_model.get_item(i).checked and self.table_model.get_item(i).size is not None
@@ -1580,55 +1570,94 @@ class MainWindow(QMainWindow):
                     total_size, size_formatted = self.table_model.get_total_size()
                     total_files = self.table_model.get_total_files()
                     status_text = (
-                        f"\u603b\u6587\u4ef6\u5939\u6570: {total_items:,} | "
-                        f"\u603b\u6587\u4ef6\u6570: {total_files:,} | "
-                        f"\u603b\u5927\u5c0f: {size_formatted}"
+                        f'总文件夹数: {total_items:,} | '
+                        f'总文件数: {total_files:,} | '
+                        f'总大小: {size_formatted}'
                     )
-                    self.file_count_label.setText(f"\u6587\u4ef6\u6570: {total_files:,}")
-                    self.size_label.setText(f"\u603b\u5927\u5c0f: {size_formatted}")
+                    self._set_label_text_if_changed(
+                        self.file_count_label,
+                        f'文件数: {total_files:,}',
+                    )
+                    self._set_label_text_if_changed(
+                        self.size_label,
+                        f'总大小: {size_formatted}',
+                    )
                 else:
-                    status_text = f"\u603b\u6587\u4ef6\u5939\u6570: {total_items:,} | \u52fe\u9009\u540e\u70b9\u51fb\u8ba1\u7b97\u67e5\u770b\u5927\u5c0f"
-                    self.file_count_label.setText("\u6587\u4ef6\u6570: \u672a\u8ba1\u7b97")
-                    self.size_label.setText("\u603b\u5927\u5c0f: \u672a\u8ba1\u7b97")
+                    status_text = f'总文件夹数: {total_items:,} | 勾选后点击计算查看大小'
+                    self._set_label_text_if_changed(self.file_count_label, '文件数: 未计算')
+                    self._set_label_text_if_changed(self.size_label, '总大小: 未计算')
 
                 if checked_has_computed:
                     checked_total_size, checked_size_formatted = self.table_model.get_checked_total_size()
                     checked_total_files = self.table_model.get_checked_total_files()
-                    self.selected_file_count_label.setText(f"\u5df2\u9009\u6587\u4ef6\u6570: {checked_total_files:,}")
-                    self.selected_size_label.setText(f"\u5df2\u9009\u603b\u5927\u5c0f: {checked_size_formatted}")
+                    self._set_label_text_if_changed(
+                        self.selected_file_count_label,
+                        f'已选文件数: {checked_total_files:,}',
+                    )
+                    self._set_label_text_if_changed(
+                        self.selected_size_label,
+                        f'已选总大小: {checked_size_formatted}',
+                    )
                 else:
-                    self.selected_file_count_label.setText("\u5df2\u9009\u6587\u4ef6\u6570: \u672a\u8ba1\u7b97")
-                    self.selected_size_label.setText("\u5df2\u9009\u603b\u5927\u5c0f: \u672a\u8ba1\u7b97")
+                    self._set_label_text_if_changed(
+                        self.selected_file_count_label,
+                        '已选文件数: 未计算',
+                    )
+                    self._set_label_text_if_changed(
+                        self.selected_size_label,
+                        '已选总大小: 未计算',
+                    )
 
                 if self.current_directory:
-                    status_text += f" | \u5f53\u524d\u76ee\u5f55: {self.current_directory}"
+                    status_text += f' | 当前目录: {self.current_directory}'
 
-                if not self._is_busy and not self._cancel_requested:
+                if (
+                    counts_changed
+                    and not self._is_busy
+                    and not self._cancel_requested
+                    and time.time() >= getattr(self, "_pinned_until", 0.0)
+                ):
                     self._set_status_message(status_text)
             else:
-                self.file_count_label.setText("\u6587\u4ef6\u6570: \u672a\u8ba1\u7b97")
-                self.size_label.setText("\u603b\u5927\u5c0f: \u672a\u8ba1\u7b97")
-                self.selected_file_count_label.setText("\u5df2\u9009\u6587\u4ef6\u6570: \u672a\u8ba1\u7b97")
-                self.selected_size_label.setText("\u5df2\u9009\u603b\u5927\u5c0f: \u672a\u8ba1\u7b97")
+                self._set_label_text_if_changed(self.file_count_label, '文件数: 未计算')
+                self._set_label_text_if_changed(self.size_label, '总大小: 未计算')
+                self._set_label_text_if_changed(
+                    self.selected_file_count_label,
+                    '已选文件数: 未计算',
+                )
+                self._set_label_text_if_changed(
+                    self.selected_size_label,
+                    '已选总大小: 未计算',
+                )
 
                 if self.current_directory:
                     self._update_current_path_label(self.current_directory)
                 else:
                     self._update_current_path_label(None)
 
-                if not self._is_busy and not self._cancel_requested:
-                    self._set_status_message("\u8bf7\u9009\u62e9\u76ee\u5f55\u5f00\u59cb\u626b\u63cf\uff0c\u6216\u76f4\u63a5\u62d6\u653e\u6587\u4ef6\u5939\u5230\u8fd9\u91cc")
-                    self._set_runtime_state("\u672a\u5f00\u59cb", "\u9009\u62e9\u76ee\u5f55\u540e\u81ea\u52a8\u626b\u63cf")
+                if (
+                    not self._is_busy
+                    and not self._cancel_requested
+                    and time.time() >= getattr(self, "_pinned_until", 0.0)
+                ):
+                    self._set_status_message('请选择目录开始扫描，或直接拖放文件夹到这里')
+                    if hasattr(self, "_set_runtime_state"):
+                        self._set_runtime_state('未开始', '选择目录后自动扫描')
 
         except Exception as e:
             self.logger.error(f"Error updating status bar: {str(e)}")
+
+    @staticmethod
+    def _set_label_text_if_changed(label: Optional[QLabel], text: str) -> None:
+        if label is not None and label.text() != text:
+            label.setText(text)
 
     def _update_current_path_label(self, path: Optional[str]) -> None:
         if not self.current_path_label:
             return
 
         if not path:
-            self.current_path_label.setText("\u672a\u9009\u62e9\u76ee\u5f55")
+            self.current_path_label.setText('未选择目录')
             self.current_path_label.setToolTip("")
             return
 
@@ -1640,6 +1669,50 @@ class MainWindow(QMainWindow):
         )
         self.current_path_label.setText(display_text)
         self.current_path_label.setToolTip(path)
+
+    def closeEvent(self, event) -> None:
+        active_workers = [worker for worker in self._workers if worker.isRunning()]
+        if self._current_worker and self._current_worker.isRunning():
+            if self._current_worker not in active_workers:
+                active_workers.append(self._current_worker)
+
+        if self._is_busy or active_workers:
+            if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+                reply = QMessageBox.question(
+                    self,
+                    "确认退出",
+                    "有任务正在进行中，是否要停止任务并退出？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    event.ignore()
+                    return
+            self._shutdown_workers()
+
+        self._stop_timers()
+        super().closeEvent(event)
+
+    def _shutdown_workers(self) -> None:
+        self.scanner.stop()
+        self._cancel_requested = True
+
+        for worker in list(self._workers):
+            if worker.isRunning():
+                worker.wait(WORKER_SHUTDOWN_TIMEOUT_MS)
+
+        if self._current_worker and self._current_worker.isRunning():
+            self._current_worker.wait(WORKER_SHUTDOWN_TIMEOUT_MS)
+
+        self._cleanup_workers()
+        self._current_worker = None
+        self._is_busy = False
+
+    def _stop_timers(self) -> None:
+        self._update_timer.stop()
+        self._autosave_timer.stop()
+        if hasattr(self, "_resource_timer"):
+            self._resource_timer.stop()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1668,15 +1741,9 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error handling select all change: {str(e)}")
 
     def _on_data_changed(self, topLeft, bottomRight, roles):
-        """处理数据变化事件
-        
-        Args:
-            topLeft: 左上角索引
-            bottomRight: 右下角索引
-            roles: 改变的角色列表
-        """
+        """处理表格数据变化。"""
         try:
-            # 更新全选状态
+            self._last_status_bar_counts = None
             self._update_select_all_state()
             
             # 更新按钮状态
@@ -1743,8 +1810,8 @@ class MainWindow(QMainWindow):
             )
             return False
 
-    def _center_window(self):
-        """处理表格项双击事件。"""
+    def _center_window(self) -> None:
+        """将主窗口居中到当前屏幕。"""
         try:
             screen = QApplication.primaryScreen().geometry()
             window = self.geometry()
@@ -1755,7 +1822,7 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error centering window: {str(e)}")
 
     def _show_context_menu(self, pos):
-        """\u663e\u793a\u7ed3\u679c\u8868\u53f3\u952e\u83dc\u5355"""
+        """显示结果表右键菜单。"""
         try:
             index = self.table_view.indexAt(pos)
             if not index.isValid():
@@ -1774,20 +1841,20 @@ class MainWindow(QMainWindow):
 
             menu = QMenu(self)
             menu.setObjectName("appMenu")
-            menu.addSection("\u5feb\u901f\u64cd\u4f5c")
+            menu.addSection('快速操作')
 
-            open_action = menu.addAction("\u6253\u5f00\u6587\u4ef6\u5939")
+            open_action = menu.addAction('打开文件夹')
             open_action.triggered.connect(lambda: self._open_item_in_file_explorer(item))
 
-            copy_path_action = menu.addAction("\u590d\u5236\u8def\u5f84")
+            copy_path_action = menu.addAction('复制路径')
             copy_path_action.triggered.connect(
                 lambda: QApplication.clipboard().setText(item.path)
             )
 
             menu.addSeparator()
-            menu.addSection("\u5904\u7406")
+            menu.addSection('处理')
 
-            calculate_action = menu.addAction("\u8ba1\u7b97\u5927\u5c0f")
+            calculate_action = menu.addAction('计算大小')
             calculate_action.setEnabled(not self._is_busy)
             calculate_action.triggered.connect(
                 lambda: self._calculate_single_item(item)
@@ -1828,12 +1895,12 @@ class MainWindow(QMainWindow):
             self.show_error("计算错误", str(e))
 
     def dragEnterEvent(self, event):
-        """\u5904\u7406\u62d6\u5165\u4e8b\u4ef6"""
+        """处理拖入事件。"""
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        """\u5904\u7406\u653e\u4e0b\u4e8b\u4ef6"""
+        """处理放下事件。"""
         try:
             urls = event.mimeData().urls()
             if urls:
@@ -1841,68 +1908,68 @@ class MainWindow(QMainWindow):
                 if os.path.isdir(path):
                     self._set_selected_directory(path)
                 else:
-                    self.show_error("\u9519\u8bef", "\u8bf7\u62d6\u653e\u6587\u4ef6\u5939\u800c\u4e0d\u662f\u6587\u4ef6")
+                    self.show_error('错误', '请拖放文件夹而不是文件')
         except Exception as e:
             self.logger.error(f"Error handling drop event: {str(e)}")
 
     def _create_menu_bar(self):
-        """\u521b\u5efa\u83dc\u5355\u680f"""
+        """创建菜单栏。"""
         try:
             menubar = self.menuBar()
             menubar.clear()
             menubar.setObjectName("appMenuBar")
 
-            file_menu = menubar.addMenu("\u6587\u4ef6(&F)")
+            file_menu = menubar.addMenu('文件(&F)')
             file_menu.setObjectName("appMenu")
 
-            self._select_action = file_menu.addAction("\u9009\u62e9\u76ee\u5f55(&O)")
+            self._select_action = file_menu.addAction('选择目录(&O)')
             self._select_action.setShortcut("Ctrl+O")
             self._select_action.triggered.connect(self.select_directory)
 
-            self._scan_action = file_menu.addAction("\u5f00\u59cb\u626b\u63cf(&S)")
+            self._scan_action = file_menu.addAction('开始扫描(&S)')
             self._scan_action.setShortcut("Ctrl+S")
             self._scan_action.triggered.connect(self.start_scan)
 
-            self._stop_action = file_menu.addAction("\u505c\u6b62(&T)")
+            self._stop_action = file_menu.addAction('停止(&T)')
             self._stop_action.setShortcut("Esc")
             self._stop_action.triggered.connect(self.stop_scan)
 
             file_menu.addSeparator()
-            exit_action = file_menu.addAction("\u9000\u51fa(&X)")
+            exit_action = file_menu.addAction('退出(&X)')
             exit_action.setShortcut("Alt+F4")
             exit_action.triggered.connect(self.close)
 
-            operation_menu = menubar.addMenu("\u64cd\u4f5c(&O)")
+            operation_menu = menubar.addMenu('操作(&O)')
             operation_menu.setObjectName("appMenu")
 
-            self._calc_action = operation_menu.addAction("\u8ba1\u7b97\u5927\u5c0f(&C)")
+            self._calc_action = operation_menu.addAction('计算大小(&C)')
             self._calc_action.setShortcut("F5")
             self._calc_action.triggered.connect(self.calculate_selected)
 
-            self._export_action = operation_menu.addAction("\u5bfc\u51fa Excel(&E)")
+            self._export_action = operation_menu.addAction('导出 Excel(&E)')
             self._export_action.setShortcut("Ctrl+E")
             self._export_action.triggered.connect(self.export_to_excel)
 
-            self._backup_action = operation_menu.addAction("\u5907\u4efd\u76ee\u5f55(&B)")
+            self._backup_action = operation_menu.addAction('备份目录(&B)')
             self._backup_action.setShortcut("Ctrl+B")
             self._backup_action.triggered.connect(self.backup_directory)
 
-            view_menu = menubar.addMenu("\u89c6\u56fe(&V)")
+            view_menu = menubar.addMenu('视图(&V)')
             view_menu.setObjectName("appMenu")
 
-            self._toolbar_toggle_action = view_menu.addAction("\u547d\u4ee4\u533a")
+            self._toolbar_toggle_action = view_menu.addAction('命令区')
             self._toolbar_toggle_action.setCheckable(True)
             self._toolbar_toggle_action.setChecked(True)
             self._toolbar_toggle_action.triggered.connect(self._toggle_toolbar)
 
-            self._bottom_panel_toggle_action = view_menu.addAction("\u72b6\u6001\u533a")
+            self._bottom_panel_toggle_action = view_menu.addAction('状态区')
             self._bottom_panel_toggle_action.setCheckable(True)
             self._bottom_panel_toggle_action.setChecked(True)
             self._bottom_panel_toggle_action.triggered.connect(self._toggle_bottom_panel)
 
-            help_menu = menubar.addMenu("\u5e2e\u52a9(&H)")
+            help_menu = menubar.addMenu('帮助(&H)')
             help_menu.setObjectName("appMenu")
-            about_action = help_menu.addAction("\u5173\u4e8e(&A)")
+            about_action = help_menu.addAction('关于(&A)')
             about_action.triggered.connect(self._show_about_dialog)
 
             self._update_button_states()
@@ -1910,7 +1977,7 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error creating menu bar: {str(e)}")
 
     def _toggle_toolbar(self, checked: bool):
-        """\u5207\u6362\u547d\u4ee4\u533a\u663e\u793a\u72b6\u6001"""
+        """切换命令区显示状态。"""
         try:
             if hasattr(self, "_toolbar_container"):
                 self._toolbar_container.setVisible(checked)
@@ -1920,7 +1987,7 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error toggling toolbar: {str(e)}")
 
     def _toggle_bottom_panel(self, checked: bool):
-        """\u5207\u6362\u5e95\u90e8\u72b6\u6001\u533a\u663e\u793a\u72b6\u6001"""
+        """切换底部状态区显示状态。"""
         try:
             if self.status_bar is not None:
                 bottom_panel = self.status_bar.parentWidget()
@@ -1930,10 +1997,10 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error toggling bottom panel: {str(e)}")
 
     def _show_about_dialog(self):
-        """\u663e\u793a\u5173\u4e8e\u5bf9\u8bdd\u6846"""
+        """显示关于对话框。"""
         try:
             dialog = QDialog(self)
-            dialog.setWindowTitle(f"\u5173\u4e8e {APP_NAME}")
+            dialog.setWindowTitle(f'关于 {APP_NAME}')
             dialog.setModal(True)
             dialog.setMinimumWidth(520)
 
@@ -1949,7 +2016,7 @@ class MainWindow(QMainWindow):
 
             title_label = QLabel(f"{APP_NAME} {APP_VERSION}")
             title_label.setObjectName("dialogHeaderLabel")
-            summary_label = QLabel("Windows \u684c\u9762\u6587\u4ef6\u5939\u626b\u63cf\u3001\u7edf\u8ba1\u3001\u5bfc\u51fa\u4e0e\u5907\u4efd\u5de5\u5177\u3002")
+            summary_label = QLabel('Windows 桌面文件夹扫描、统计、导出与备份工具。')
             summary_label.setObjectName("dialogStatusLabel")
             summary_label.setWordWrap(True)
 
@@ -1959,7 +2026,7 @@ class MainWindow(QMainWindow):
 
             button_layout = QHBoxLayout()
             button_layout.addStretch()
-            close_button = QPushButton("\u5173\u95ed")
+            close_button = QPushButton('关闭')
             close_button.setObjectName("dialogPrimaryButton")
             close_button.clicked.connect(dialog.accept)
             button_layout.addWidget(close_button)

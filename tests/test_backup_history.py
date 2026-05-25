@@ -32,6 +32,58 @@ class BackupHistoryTests(unittest.TestCase):
         self.assertEqual(len(history), MAX_BACKUP_HISTORY)
         self.assertEqual(history[0].dest_path, f"D:\\backup-{MAX_BACKUP_HISTORY + 2}")
 
+    def test_recent_directories_deduplicate_slash_variants(self):
+        self.config.set_setting(
+            "recent_directories",
+            ["J:\\", "J:/", "H:\\", "H:/"],
+        )
+
+        directories = self.config.get_recent_directories()
+
+        self.assertEqual(directories, ["J:\\", "H:\\"])
+
+    def test_recent_directories_deduplicate_unc_slash_variants(self):
+        self.config.set_setting(
+            "recent_directories",
+            [
+                r"\\172.16.51.56\project backup",
+                "//172.16.51.56/project backup",
+                "\\\\172.16.51.56\\project backup\\\\",
+            ],
+        )
+
+        directories = self.config.get_recent_directories()
+
+        self.assertEqual(directories, [r"\\172.16.51.56\project backup"])
+
+    def test_add_recent_directory_merges_slash_variants(self):
+        self.config.add_recent_directory("J:\\")
+        self.config.add_recent_directory("J:/")
+
+        directories = self.config.get_recent_directories()
+
+        self.assertEqual(directories, ["J:\\"])
+        self.assertEqual(self.config.get_setting("last_directory"), "J:\\")
+
+    def test_recent_backup_destinations_deduplicate_slash_variants(self):
+        self.config.set_setting(
+            "recent_backup_destinations",
+            ["J:\\", "J:/", "H:\\", "H:/"],
+        )
+
+        destinations = self.config.get_recent_backup_destinations()
+
+        self.assertEqual(destinations, ["J:\\", "H:\\"])
+
+    def test_add_recent_backup_destination_merges_slash_variants(self):
+        self.config.add_recent_backup_destination("J:\\")
+        self.config.add_recent_backup_destination("J:/")
+
+        destinations = self.config.get_recent_backup_destinations()
+
+        self.assertEqual(destinations, ["J:\\"])
+        self.assertEqual(self.config.get_setting("last_backup_destination"), "J:\\")
+
     def test_recent_backup_destinations_track_last_selection(self):
         self.config.add_recent_backup_destination(r"H:\archive")
         self.config.add_recent_backup_destination(r"D:\backup")

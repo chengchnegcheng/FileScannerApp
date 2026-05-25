@@ -42,8 +42,20 @@ def normalize_directory_path(path: str) -> str:
     if not path:
         return path
 
-    normalized = path
-    if os.name == "nt":
-        normalized = normalized.replace("/", "\\")
+    stripped = path.strip()
+    if os.name != "nt":
+        return os.path.normpath(stripped)
 
-    return os.path.normpath(normalized)
+    normalized = stripped.replace("/", "\\")
+    if normalized.startswith("\\"):
+        # 统一 UNC 与前导斜杠：//server、\\server、\\\server -> \\server
+        normalized = "\\\\" + normalized.lstrip("\\")
+
+    normalized = os.path.normpath(normalized)
+
+    # 去掉尾部反斜杠，避免 \\host\share 与 \\host\share\ 被当成两条
+    if len(normalized) > 3 and normalized.endswith("\\"):
+        if not (len(normalized) == 3 and normalized[1] == ":"):
+            normalized = normalized.rstrip("\\")
+
+    return normalized

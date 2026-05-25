@@ -37,7 +37,25 @@ class PathUtilsTests(unittest.TestCase):
 
         normalized = normalize_directory_path(mixed_path)
 
-        self.assertEqual(normalized, os.path.normpath(r"\\172.16.51.56\project backup\30667"))
+        self.assertEqual(normalized, r"\\172.16.51.56\project backup\30667")
+
+    def test_normalize_directory_path_merges_unc_slash_variants(self):
+        variants = [
+            r"\\172.16.51.56\project backup",
+            "//172.16.51.56/project backup",
+            r"\\172.16.51.56/project backup",
+            r"\\172.16.51.56\project backup\\",
+            "//172.16.51.56/project backup/",
+        ]
+        expected = r"\\172.16.51.56\project backup"
+
+        normalized = {normalize_directory_path(path) for path in variants}
+
+        self.assertEqual(normalized, {expected})
+
+    def test_normalize_directory_path_keeps_drive_root(self):
+        self.assertEqual(normalize_directory_path("C:\\"), "C:\\")
+        self.assertEqual(normalize_directory_path("C:\\folder\\\\"), "C:\\folder")
 
 
 if __name__ == "__main__":

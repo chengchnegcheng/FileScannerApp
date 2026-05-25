@@ -279,6 +279,9 @@ class FileScanner:
                     )
                     rollback_session.cleanup()
 
+                except BackupCancelled:
+                    rollback_session.cleanup()
+                    return False
                 except Exception as e:
                     if not self.stopped:
                         self.last_backup_error = str(e)
@@ -293,6 +296,8 @@ class FileScanner:
 
             return not self.stopped
 
+        except BackupCancelled:
+            return False
         except Exception as e:
             if not self.stopped:
                 self.last_backup_error = str(e)
@@ -359,7 +364,7 @@ class FileScanner:
                 copied = 0
                 while True:
                     if self.stopped:
-                        raise Exception("Operation cancelled")
+                        raise BackupCancelled("Operation cancelled")
 
                     buf = fsrc.read(8192)
                     if not buf:
@@ -399,6 +404,8 @@ class FileScanner:
                     progress_state["total_bytes"],
                 )
 
+        except BackupCancelled:
+            raise
         except Exception as e:
             self.logger.error(f"Error copying {src} to {dst}: {str(e)}")
-            raise 
+            raise
