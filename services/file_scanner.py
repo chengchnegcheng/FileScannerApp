@@ -2,9 +2,12 @@ import os
 import shutil
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Generator, Optional, Callable, List
+
+_DIR_INFO_CACHE_MAX = 512
 from models.file_item import FileItem
 from services.backup_support import (
     BackupCancelled,
@@ -34,11 +37,24 @@ class FileScanner:
         self.stopped = False
         self.last_backup_error: Optional[str] = None
         self.last_backup_stats: Optional[BackupStats] = None
-        self._dir_info_cache: dict[str, tuple[tuple[int, int], int, int]] = {}
+        self._dir_info_cache: OrderedDict[str, tuple[tuple[int, int], int, int]] = OrderedDict()
 
     def clear_calculation_cache(self):
         """清空目录计算缓存。"""
         self._dir_info_cache.clear()
+
+    def _store_dir_info_cache(
+        self,
+        path: str,
+        signature: tuple[int, int],
+        total_size: int,
+        file_count: int,
+    ) -> None:
+        if path in self._dir_info_cache:
+            del self._dir_info_cache[path]
+        self._dir_info_cache[path] = (signature, total_size, file_count)
+        while len(self._dir_info_cache) > _DIR_INFO_CACHE_MAX:
+            self._dir_info_cache.popitem(last=False)
 
     def _get_directory_signature(self, path: str) -> Optional[tuple[int, int]]:
         try:
@@ -206,7 +222,12 @@ class FileScanner:
             else:
                 total_size, file_count = self._calculate_directory_info_uncached(item.path)
                 if signature is not None and not self.stopped:
-                    self._dir_info_cache[item.path] = (signature, total_size, file_count)
+                    self._store_dir_info_cache(
+                        item.path,
+                        signature,
+                        total_size,
+                        file_count,
+                    )
             
             # 更新文件项信息
             item.size = total_size

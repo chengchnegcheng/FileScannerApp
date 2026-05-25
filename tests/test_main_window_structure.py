@@ -6,7 +6,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QAbstractItemView, QLabel, QMessageBox
+from PyQt5.QtWidgets import QApplication, QAbstractItemView, QLabel, QMessageBox, QToolButton
 
 from models.file_item import FileItem
 from utils.config_manager import ConfigManager
@@ -108,17 +108,20 @@ class MainWindowStructureTests(unittest.TestCase):
 
         scan_mock.assert_called_once_with(chosen)
 
-    def test_select_directory_shows_recent_menu_when_recent_exists(self):
-        self.window.config.set_setting("recent_directories", [r"C:\recent-a", r"C:\recent-b"])
-
-        with patch.object(self.window, "_browse_directory") as browse_mock, patch.object(
-            self.window,
-            "_show_directory_menu",
-        ) as menu_mock:
+    def test_select_directory_opens_browse_dialog(self):
+        with patch.object(self.window, "_browse_directory") as browse_mock:
             self.window.select_directory()
 
-        browse_mock.assert_not_called()
-        menu_mock.assert_called_once_with()
+        browse_mock.assert_called_once()
+
+    def test_select_button_exposes_recent_directories_menu(self):
+        self.window.config.set_setting("recent_directories", ["C:\\recent-a", "C:\\recent-b"])
+        self.window._refresh_select_directory_menu()
+
+        self.assertIsInstance(self.window.select_btn, QToolButton)
+        menu = self.window.select_btn.menu()
+        self.assertIsNotNone(menu)
+        self.assertEqual(len(menu.actions()), 2)
 
     def test_set_selected_directory_without_auto_scan_still_updates_recent_history(self):
         chosen = os.path.join(self.temp_dir.name, "chosen")

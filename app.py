@@ -39,40 +39,11 @@ def setup_environment():
         print(f"Error setting up environment: {str(e)}")
         sys.exit(1)
 
-def check_resources():
-    """检查必要的资源文件"""
-    try:
-        # 检查样式文件
-        style_file = get_resource_path("resources/styles/main.qss")
-        if not style_file.exists():
-            print(f"Warning: Style file not found: {style_file}")
-        
-        # 检查图标文件
-        required_icons = [
-            'folder', 'play', 'stop', 'calculate', 
-            'export', 'backup'
-        ]
-        
-        icon_dir = get_resource_path("resources/icons")
-        missing_icons = [
-            icon for icon in required_icons 
-            if not (icon_dir / f"{icon}.png").exists()
-        ]
-        
-        if missing_icons:
-            print(f"Warning: Missing icons: {', '.join(missing_icons)}")
-            
-    except Exception as e:
-        print(f"Error checking resources: {str(e)}")
-
 def main():
     """主函数"""
     try:
         # 设置运行环境
         setup_environment()
-        
-        # 检查资源
-        check_resources()
         
         # 创建应用程序实例
         app = QApplication(sys.argv)

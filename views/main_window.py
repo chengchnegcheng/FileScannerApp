@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QProgressBar, QStatusBar, QHBoxLayout, QMessageBox,
     QLabel, QMenu, QDialog, QShortcut,
     QCheckBox, QApplication, QFrame, QStyle, QSizePolicy, QHeaderView,
-    QStyledItemDelegate, QStyleOptionViewItem,
+    QStyledItemDelegate, QStyleOptionViewItem, QToolButton,
 )
 from PyQt5.QtCore import (
     QThread, Qt, QTimer, QItemSelectionModel,
@@ -396,12 +396,7 @@ class MainWindow(QMainWindow):
             command_layout.setSpacing(8)
             command_layout.setContentsMargins(8, 8, 8, 8)
 
-            self.select_btn = self._create_button(
-                '选择目录',
-                "folder",
-                self.select_directory,
-                '选择要扫描的目录（支持最近记录） (Ctrl+O)',
-            )
+            self.select_btn = self._create_select_directory_button()
             self.start_btn = self._create_button(
                 '开始扫描',
                 "play",
@@ -697,6 +692,38 @@ class MainWindow(QMainWindow):
             self.logger.error(f"Error creating bottom panel: {str(e)}")
             raise
 
+    def _create_select_directory_button(self) -> QToolButton:
+        """主点击打开文件夹对话框，下拉箭头展示最近目录。"""
+        button = QToolButton()
+        button.setText("选择目录")
+        button.setObjectName("toolbarButton")
+        button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        button.setPopupMode(QToolButton.MenuButtonPopup)
+        button.setIcon(self._get_button_icon("folder"))
+        button.setMinimumSize(DEFAULT_BUTTON_SIZE)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setToolTip("选择要扫描的目录；点击 ▾ 查看最近记录 (Ctrl+O)")
+        button.clicked.connect(self._browse_directory)
+        self._refresh_select_directory_menu(button)
+        return button
+
+    def _refresh_select_directory_menu(self, button: Optional[QToolButton] = None) -> None:
+        target = button or self.select_btn
+        if not isinstance(target, QToolButton):
+            return
+
+        menu = QMenu(self)
+        for path in self.config.get_recent_directories():
+            action = menu.addAction(path)
+            action.triggered.connect(
+                lambda checked=False, selected=path: self._set_selected_directory(selected)
+            )
+
+        if menu.isEmpty():
+            target.setMenu(None)
+        else:
+            target.setMenu(menu)
+
     def _create_button(
         self, 
         text: str, 
@@ -891,36 +918,11 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda *_: QTimer.singleShot(0, apply_button_labels))
 
     def select_directory(self):
-        """选择目录"""
+        """选择目录（快捷键/菜单入口，直接打开浏览对话框）。"""
         try:
-            recent_dirs = self.config.get_recent_directories()
-            if recent_dirs:
-                self._show_directory_menu()
-            else:
-                self._browse_directory()
+            self._browse_directory()
         except Exception as e:
             self.logger.error(f"Error selecting directory: {str(e)}")
-
-    def _show_directory_menu(self):
-        """显示最近目录菜单"""
-        try:
-            menu = QMenu(self)
-            recent_dirs = self.config.get_recent_directories()
-
-            for path in recent_dirs:
-                action = menu.addAction(path)
-                action.triggered.connect(lambda checked, p=path: self._set_selected_directory(p))
-                
-            menu.addSeparator()
-            browse_action = menu.addAction("浏览...")
-            browse_action.triggered.connect(self._browse_directory)
-            
-            # 显示菜单
-            anchor = self.select_btn.mapToGlobal(self.select_btn.rect().bottomLeft()) if self.select_btn else QCursor.pos()
-            menu.exec_(anchor)
-            
-        except Exception as e:
-            self.logger.error(f"Error showing directory menu: {str(e)}")
 
     def _browse_directory(self):
         """浏览并选择目录"""
@@ -957,6 +959,7 @@ class MainWindow(QMainWindow):
         self._set_status_message("已选择目录，正在准备扫描")
 
         self.config.add_recent_directory(path)
+        self._refresh_select_directory_menu()
 
         if auto_scan:
             self._scan_directory(path)
